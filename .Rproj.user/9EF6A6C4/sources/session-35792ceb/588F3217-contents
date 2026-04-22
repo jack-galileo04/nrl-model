@@ -1,0 +1,373 @@
+---
+title: "nrl_modelling"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(here)
+
+model_data <- read.csv(here("Data/Processed/feature_engineered.csv")) |> 
+  select(result, everything()) |> 
+  mutate(result = factor(result), result = ifelse(result == "H", "H", "A")) |> 
+  mutate(date = as_date(date))
+
+feature_set = "odds, elos, stats, forms"
+```
+
+```{r Data Split}
+
+library(rsample)
+
+cutoff <- as.Date("2024-02-01")
+
+train_data <- model_data |>  filter(date < cutoff)
+test_data  <- model_data |>  filter(date >= cutoff)
+
+N <- nrow(train_data)
+number_folds <- 5
+assess <- 500
+skip <- 100
+initial <- -(number_folds*skip+assess-N)
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+
+metrics <- yardstick::metric_set(mn_log_loss, accuracy, f_meas)
+```
+
+
+```{r Model Recipes}
+
+xgb_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_date(date, features = "month") |> 
+  step_rm(notes,over_time, bookmakers_surveyed, 
+          date, venue, home_score, away_score,
+          home_point_diff:away_point_against,
+          home_line_open:total_score_under_close) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_mutate(home_odds_open = coalesce(home_odds_open, home_odds),
+              home_odds_min = coalesce(home_odds_open, home_odds),
+              home_odds_max = coalesce(home_odds_open, home_odds),
+              home_odds_close = coalesce(home_odds_open, home_odds),
+              away_odds_open = coalesce(away_odds_open, away_odds),
+              away_odds_min = coalesce(away_odds_open, away_odds),
+              away_odds_max = coalesce(away_odds_open, away_odds),
+              away_odds_close = coalesce(away_odds_open, away_odds)) |> 
+  step_naomit(all_predictors()) # Fix Later
+
+rf_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_date(date, features = "month") |> 
+  step_rm(notes,over_time, bookmakers_surveyed, 
+          date, venue, home_score, away_score,
+          home_point_diff:away_point_against,
+          home_line_open:total_score_under_close) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+    step_mutate(home_odds_open = coalesce(home_odds_open, home_odds),
+              home_odds_min = coalesce(home_odds_open, home_odds),
+              home_odds_max = coalesce(home_odds_open, home_odds),
+              home_odds_close = coalesce(home_odds_open, home_odds),
+              away_odds_open = coalesce(away_odds_open, away_odds),
+              away_odds_min = coalesce(away_odds_open, away_odds),
+              away_odds_max = coalesce(away_odds_open, away_odds),
+              away_odds_close = coalesce(away_odds_open, away_odds)) |> 
+  step_naomit(all_predictors()) # Fix Later
+
+lasso_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_date(date, features = "month") |> 
+  step_rm(notes,over_time, bookmakers_surveyed, 
+          date, venue, home_score, away_score,
+          home_point_diff:away_point_against,
+          home_line_open:total_score_under_close) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_corr() |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_mutate(home_odds_open = coalesce(home_odds_open, home_odds),
+              home_odds_min = coalesce(home_odds_open, home_odds),
+              home_odds_max = coalesce(home_odds_open, home_odds),
+              home_odds_close = coalesce(home_odds_open, home_odds),
+              away_odds_open = coalesce(away_odds_open, away_odds),
+              away_odds_min = coalesce(away_odds_open, away_odds),
+              away_odds_max = coalesce(away_odds_open, away_odds),
+              away_odds_close = coalesce(away_odds_open, away_odds)) |> 
+  step_naomit(all_predictors())
+
+juiced <- xgb_rec |> prep() |> juice()
+```
+
+```{r Model Specifications}
+
+xgb_spec <- boost_tree(
+  trees = 1000,
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  sample_size = tune(), mtry = tune(),
+  learn_rate = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+rf_spec <- rand_forest(
+  trees = 1000,
+  mtry = tune(), min_n = tune()
+) |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+lasso_spec <- logistic_reg(
+  penalty = tune(), 
+  mixture = 1) |> 
+  set_mode("classification") |> 
+  set_engine("glmnet")
+```
+
+
+```{r xgb Workflow}
+
+xgb_wf <- workflow() |> 
+  add_model(xgb_spec) |> 
+  add_recipe(xgb_rec)
+
+sample_size_range <- dials::sample_prop(range = c(0.5, 0.9))
+
+xgb_grid <- grid_space_filling(
+  tree_depth(range = c(3,6)),
+  min_n(),
+  loss_reduction(),
+  sample_size_range,
+  mtry(c(40L, 85L)),
+  learn_rate(),
+  size = 20)
+```
+
+```{r Random Forest Workflow}
+
+rf_wf <- workflow() |> 
+  add_model(rf_spec) |> 
+  add_recipe(rf_rec)
+
+rf_grid <- grid_space_filling(
+  min_n(),
+  mtry(c(40L, 85L)),
+  size = 10)
+```
+
+```{r Lasso Regression Workflow}
+
+lasso_wf <- workflow() |> 
+  add_model(lasso_spec) |> 
+  add_recipe(lasso_rec)
+
+lasso_grid <- grid_regular(
+  penalty(),
+  levels = 20
+)
+```
+
+
+```{r xgb Tune}
+
+set.seed(123)
+xgb_tune_res <- tune_grid(
+  xgb_wf,
+  resamples = folds,
+  grid = xgb_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  metrics = metrics
+)
+xgb_best_logloss <- xgb_tune_res |> select_best(metric = "mn_log_loss")
+xgb_logloss <- (xgb_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+log_experiment(algorithm = "xgb",
+               feature_set = feature_set,
+               resample_scheme = "5 cv folds",
+               logloss = xgb_logloss,
+               notes = "")
+
+saveRDS(xgb_tune_res, here("Outputs/Models/xgb_tune_res.rds"))
+```
+
+
+```{r Random Forest Tune}
+
+set.seed(123)
+rf_tune_res <- tune_grid(
+  rf_wf,
+  resamples = folds,
+  grid = rf_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  metrics = metrics
+)
+rf_best_logloss <- rf_tune_res |> select_best(metric = "mn_log_loss")
+rf_logloss <- (rf_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+log_experiment(algorithm = "rf",
+               feature_set = feature_set,
+               resample_scheme = "5 cv folds",
+               logloss = rf_logloss,
+               notes = "")
+
+saveRDS(rf_tune_res, here("Outputs/Models/rf_tune_res.rds"))
+```
+
+
+```{r Lasso Regression Tune}
+
+set.seed(123)
+lasso_tune_res <- tune_grid(
+  lasso_wf,
+  resamples = folds,
+  grid = lasso_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  metrics = metrics
+)
+lasso_best_logloss <- lasso_tune_res |> select_best(metric = "mn_log_loss")
+lasso_logloss <- (lasso_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+log_experiment(algorithm = "lasso",
+               feature_set = feature_set,
+               resample_scheme = "5 cv folds",
+               logloss = lasso_logloss,
+               notes = "")
+
+saveRDS(lasso_tune_res, here("Outputs/Models/lasso_tune_res.rds"))
+```
+
+```{r Final Fits}
+
+final_lasso <- finalize_workflow(lasso_wf, lasso_best_logloss) |> 
+  fit(data = train_data)
+saveRDS(final_lasso, here("Outputs/final_lasso_fit.rds"))
+
+final_xgb <- finalize_workflow(xgb_wf, xgb_best_logloss) |> 
+  fit(data = train_data)
+saveRDS(final_xgb, here("Outputs/final_xgb_fit.rds"))
+
+final_rf <- finalize_workflow(rf_wf, rf_best_logloss) |> 
+  fit(data = train_data)
+saveRDS(final_rf, here("Outputs/Models/final_rf_fit.rds"))
+
+```
+
+```{r Model Stack Data Split (same split)}
+
+stack_train_data <- train_data |> 
+  select(date, result) |> 
+  bind_cols(predict(final_lasso, train_data, type = "prob") |> rename(lasso_A = .pred_A, lasso_H = .pred_H),
+            predict(final_xgb, train_data, type = "prob") |> rename(xgb_A = .pred_A, xgb_H = .pred_H),
+            predict(final_xgb, train_data, type = "prob") |> rename(rf_A = .pred_A, rf_H = .pred_H))
+
+stack_test_data <- test_data |> 
+  select(date, result) |> 
+  bind_cols(predict(final_lasso, test_data, type = "prob") |> rename(lasso_A = .pred_A, lasso_H = .pred_H),
+            predict(final_xgb, test_data, type = "prob") |> rename(xgb_A = .pred_A, xgb_H = .pred_H),
+            predict(final_xgb, test_data, type = "prob") |> rename(rf_A = .pred_A, rf_H = .pred_H))
+```
+
+```{r Validation Folds}
+
+N <- nrow(stack_train_data)
+number_folds <- 5
+assess <- 500
+skip <- 100
+initial <- -(number_folds*skip+assess-N)
+
+stack_folds <- rolling_origin(
+  data = stack_train_data,
+  initial = initial,
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+
+stack_data <- stack_train_data |> bind_rows(stack_test_data)
+stack_split <- initial_time_split(stack_data, prop = 0.875475)
+```
+
+```{r Lasso Regression to Ensamble}
+
+stack_model <- logistic_reg(penalty = tune(), mixture = tune()) |> 
+  set_mode("classification") |> 
+  set_engine("glmnet")
+
+stack_rec <- recipe(result ~ ., data = stack_train_data) |> 
+  step_rm(date) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_zv() |> 
+  step_nzv() |> 
+  step_impute_knn(all_numeric_predictors(), neighbors = 5)
+
+stack_wf <- workflow() |> 
+  add_recipe(stack_rec) |> 
+  add_model(stack_model)
+
+stack_grid <- grid_regular(
+  penalty(range = c(-6,0)),
+  mixture(range = c(0,1)),
+  levels = c(10,5)
+)
+
+stack_res <- tune_grid(
+  stack_wf, resamples = stack_folds, grid = stack_grid, metrics = metrics, control = control_grid(save_pred = TRUE)
+)
+saveRDS(stack_res, here("Outputs/Models/stack_res.rds"))
+
+best_logloss <- stack_res |> select_best(metric = "mn_log_loss")
+```
+
+```{r Final Ensamble Fit}
+
+final_stack_wf <- finalize_workflow(stack_wf, best_logloss)
+
+final_stack_fit <- last_fit(final_stack_wf, stack_split, metrics = metrics)
+saveRDS(final_stack_fit, here("Outputs/Models/final_stack_fit.rds"))
+
+final_metrics <- collect_metrics(final_stack_fit) |> 
+  select(metric = .metric, estimate = .estimate) |> 
+  pivot_wider(names_from = metric, values_from = estimate)
+
+test_preds <- collect_predictions(final_stack_fit) |> slice_tail(n = 426) |> 
+  bind_cols(test_data |> select(home_team, away_team, date)) |> 
+  select(-.config, -.row, -id) |> 
+  arrange(desc(date))
+
+log_experiment(algorithm = "final stack",
+               feature_set = feature_set,
+               resample_scheme = "5 cv folds",
+               logloss = final_metrics$mn_log_loss,
+               notes = "")
+```
+
+```{r}
+knitr::purl(here("Scripts/modelling.Rmd"), output = here("Scripts/03_modelling_script.R"), documentation = 0)
+```
+
+
+
+
+
+
+
+
+
+

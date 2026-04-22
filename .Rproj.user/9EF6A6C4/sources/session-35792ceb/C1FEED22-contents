@@ -1,0 +1,104 @@
+```{r}
+# Group statistics into channels (work about better weighted average)
+
+player_channels_df <- player_forms_df |> 
+  rowwise() |> 
+  mutate(
+    att_runs = mean(c(m_per_run,tb_per_run,lb_per_run,offs_per_run), na.rm = TRUE),
+    att_plays = mean(c(ta_per_touch,lba_per_touch,kick_per_touch,pass_per_touch,km_per_kick,goals_per_kick), na.rm = TRUE),
+    att_overall = mean(c(tries_per_game,-err_per_touch,points_per_game), na.rm = TRUE),
+    def_work = mean(c(tackles_time,saves_per_game), na.rm = TRUE),
+    def_disc = mean(c(miss_per_t,pen_per_t,ineff_per_t), na.rm = TRUE)
+  ) |> 
+  ungroup() |> 
+  select(-(13:31)) |> 
+  group_by(competition_id, round, position) |> 
+  mutate(across(
+    10:13,
+    .fns = ~scale(.x)
+  )) |> 
+  ungroup() |> 
+  left_join(team_and_recovery_df |> select(match_id, team_name, score), by = c("match_id", "team_name"))
+```
+
+```{r}
+# Gauging general importance of each channel for scoring
+
+channel_effects_df <- player_channels_df |> 
+  group_by(match_id, team_name) |> 
+  reframe(
+    across(11:15, ~ mean(.x, na.rm = TRUE)),
+    score = first(score),
+    date = first(utc_start),
+    team_location = first(team_location)
+  ) |> 
+  drop_na() |> 
+  arrange(match_id) |> 
+  group_by(match_id) |> 
+  mutate(opponent_score = rev(score),
+         score_diff = score - opponent_score) |> 
+  ungroup()
+
+lm_fit_att <- lm(sqrt(score) ~  def_disc + att_runs + att_plays + att_overall + def_work, data = channel_effects_df)
+summary(lm_fit_att) # att_overall > att_runs > att_plays
+lm_fit_def <- lm(sqrt(opponent_score) ~  def_disc + att_runs + att_plays + att_overall + def_work, data = channel_effects_df)
+summary(lm_fit_def) # att_overal > att_runs > att_plays > def_work
+lm_fit_diff <- lm(sqrt(score_diff) ~  def_disc + att_runs + att_plays + att_overall + def_work, data = channel_effects_df)
+summary(lm_fit_diff) # att_overal > att_runs > att_plays > def_work
+# Defensive work appears to be a negative (less posession etc)
+
+channel_effects_df |> 
+  summarise(mean_score = mean(score))
+
+channel_effects_df |> 
+  group_by(team_location) |> 
+  summarise(mean_score = mean(score))
+```
+
+```{r}
+# Original Bayes Model Data
+
+model_data <- channel_effects_df |> 
+  select(-opponent_score, -score_diff) |> 
+  mutate(
+    roster_strength = 0.4 * att_overall + 0.2 * att_runs + 0.2 * att_plays - 0.15 * def_work + 0.05 * def_disc
+    ) |> 
+  select(match_id, date, team = team_name, score, team_location, roster_strength) |> 
+  pivot_wider(
+    names_from = team_location,
+    values_from = c(score, team, roster_strength)
+  ) |> 
+  mutate(
+    team_away = factor(team_away),
+    team_home = factor(team_home),
+    match_id = factor(match_id),
+    R_diff_home = scale(roster_strength_home - roster_strength_away),
+    R_diff_away = scale(roster_strength_away - roster_strength_home),
+    HA = 1
+  ) |> 
+  select(-roster_strength_home, roster_strength_away) |> 
+  drop_na()
+
+model_data_long <- bind_rows(
+  model_data |> 
+    transmute(
+      match_id,
+      date,
+      team = team_home,
+      opponent = team_away,
+      score = score_home,
+      is_home = 1L,
+      R_diff = R_diff_home
+    ),
+  model_data |> 
+    transmute(
+      match_id,
+      date,
+      team = team_away,
+      opponent = team_home,
+      score = score_away,
+      is_home = 0L,
+      R_diff = R_diff_away
+    )
+)
+```

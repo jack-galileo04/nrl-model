@@ -1,0 +1,26 @@
+{
+    "id": "F0452BCA",
+    "path": "~/Projects/Analysis-EPL/Scripts/modelling-script.Rmd",
+    "project_path": null,
+    "type": "r_markdown",
+    "hash": "4119113289",
+    "contents": "",
+    "dirty": false,
+    "created": 1764067046427.0,
+    "source_on_save": false,
+    "relative_order": 3,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "828,41",
+        "scrollLine": "813"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1763204423,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1763204423,
+    "read_only": false,
+    "read_only_alternatives": []
+}

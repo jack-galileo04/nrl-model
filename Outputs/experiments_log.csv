@@ -1,0 +1,12 @@
+timestamp,algorithm,feature_set,resample_scheme,logloss,notes
+24/11/2025,lasso,"odds, elos, stas, forms",5 cv dolds,0.5549414,
+24/11/2025,xgb,"odds, elos, stas, forms",5 cv dolds,0.5872911,
+24/11/2025,rf,"odds, elos, stas, forms",5 cv dolds,0.6153811,
+2026-02-23T01:43:37Z,xgb,"odds, elos, stats, forms",5 cv folds,0.587908275,
+2026-02-23T01:51:19Z,rf,"odds, elos, stats, forms",5 cv folds,0.615286574,
+2026-02-23T01:51:30Z,lasso,"odds, elos, stats, forms",5 cv folds,0.554949277,
+2026-02-23T02:05:02Z,final stack,"odds, elos, stats, forms",5 cv folds,0.840939905,
+2026-04-18T15:13:00Z,xgb,"include lineup forms, elso, rest days, field position, possession",5 cv folds,0.48330211320246325,
+2026-04-18T15:42:36Z,xgb,"include lineup forms, elso, rest days, field position, possession",5 cv folds,0.5848328072329003,
+2026-04-22T03:35:19Z,xgb,"include lineup forms, eloo, rest days, field position, possession, all differentials",10 cv folds,0.6438426833183408,
+2026-04-22T04:17:00Z,xgb,"include lineup forms, ladders, elo, rest days, field position, possession, all differentials",10 cv folds,0.6393433534234557,

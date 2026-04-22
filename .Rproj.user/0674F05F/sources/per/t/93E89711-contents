@@ -1,0 +1,3 @@
+library(readxl)
+library(tidyverse)
+nrl <- read_excel("nrl.xlsx")

@@ -1,0 +1,145 @@
+---
+title: "eda"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(here)
+library(readxl)
+
+ladder_df <- read_csv(here("Data/Raw/Ladder Data.csv"), col_select = -1)
+player_df <- read_csv(here("Data/Raw/Player Data.csv"), col_select = -1)
+team_df <- read_csv(here("Data/Raw/Team Data.csv"), col_select = -1)
+
+player_df <- player_df |> 
+  mutate(utc_start = as_date(utc_start))
+team_df <- team_df |> 
+  mutate(utc_start = as_date(utc_start))
+```
+
+```{r}
+# Player Level
+
+summary(player_df)
+```
+
+```{r}
+pois <- tibble(
+  tries = 0:max(player_df$tries),
+  density = dpois(0:max(player_df$tries), lambda = mean(player_df$tries))
+)
+
+player_df |> 
+  mutate(tries = as.integer(tries)) |> 
+  group_by(tries) |>
+  summarise(density = n()/nrow(player_df)) |> 
+  ggplot(aes(tries, density)) +
+  geom_col() +
+  geom_line(data = pois, colour = "red", linewidth = 2)
+
+player_df |> 
+  group_by(tries) |>
+  summarise(density = n()/nrow(player_df)) |> 
+  bind_cols(pois |> select(density))
+
+# Negative binomial?
+```
+
+```{r}
+# Team Level
+
+team_df |> 
+  group_by(match_id) |> 
+  reframe(team_location, score) |> 
+  pivot_wider(names_from = team_location,
+              values_from = score) |> 
+  unnest(c(away, home)) |> 
+  group_by(match_id) |> 
+  slice_head(n = 1) |> 
+  ungroup() |> 
+  mutate(result = case_when(
+    home > away ~ "Home",
+    home < away ~ "Away",
+    home == away ~ NA
+  )) |> 
+  drop_na() |> 
+  count(result) |> 
+  ggplot(aes(result, n)) +
+  geom_col()
+
+# Approximately a 13% edge for home teams.
+```
+
+```{r}
+mean(team_df$score)
+log(mean(team_df$score))
+
+# Average team score is approximately 22, 3 on log scale.
+```
+
+```{r}
+mean_score = mean(team_df$score)
+
+pois <- tibble(
+  score = 0:max(team_df$score),
+  density = dpois(0:max(team_df$score), lambda = mean_score)
+)
+
+team_df |> 
+  mutate(score = as.integer(score)) |> 
+  group_by(score) |>
+  summarise(density = n()/nrow(team_df)) |> 
+  ggplot(aes(score, density)) +
+  geom_col() +
+  geom_line(data = pois, colour = "red", linewidth = 2)
+
+# Negative binomial?
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

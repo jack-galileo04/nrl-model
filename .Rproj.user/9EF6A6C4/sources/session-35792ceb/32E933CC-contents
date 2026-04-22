@@ -1,0 +1,113 @@
+---
+title: "feature_engineering"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(here)
+
+data_clean <- read.csv(here("Data/Processed/matches_clean.csv"))
+```
+
+
+```{r Tuning ELO Model}
+library(elo)
+
+elo_input <- data_clean |> 
+  mutate(result = case_when(
+    result == "H" ~ 1,
+    result == "A" ~ 0,
+    T ~ 0.5
+  )) |> 
+  arrange(date)
+
+k_logloss <- vector("list", 61)
+
+for(k in 1:60){
+  elo_df <- elo.run(result ~ home_team + away_team, data = elo_input, k = k) |> 
+    as.data.frame() |> 
+    bind_cols(elo_input) |> 
+    select(home_elo = elo.A, away_elo = elo.B, home_pr = p.A, result, home_team, away_team)
+
+  k_logloss[[k]] <- (elo_df |> select(home_team, away_team, home_pr, result) |> 
+    summarise(logloss = -1/n()*sum(result*log(home_pr) + (1-result)*log(1-home_pr))))$logloss
+}
+
+min_k <- which.min(unlist(k_logloss))
+```
+
+
+```{r Elo Features}
+elo_model <- elo.run(result ~ home_team + away_team, data = elo_input, k = min_k) |> 
+  as_tibble() |> 
+  mutate(home_elo = elo.A-update.A, away_elo = elo.B - update.B) |> # This ensures no data leakage
+  select(home_elo, away_elo, home_pr = p.A)
+
+recent_elo_model <- elo.run(result ~ home_team + away_team, data = elo_input, k = 10) |> 
+  as_tibble() |> 
+  mutate(home_recent_elo = elo.A-update.A, away_recent_elo = elo.B - update.B) |> # This ensures no data leakage
+  select(home_recent_elo, away_recent_elo, home_recent_pr = p.A)
+
+long_elo_model <- elo.run(result ~ home_team + away_team, data = elo_input, k = 40) |> 
+  as_tibble() |> 
+  mutate(home_long_elo = elo.A-update.A, away_long_elo = elo.B - update.B) |> # This ensures no data leakage
+  select(home_long_elo, away_long_elo, home_long_pr = p.A)
+
+elo_df <- data_clean |> 
+  select(date, home_team, away_team, match_id) |> 
+  bind_cols(elo_model, recent_elo_model, long_elo_model) |> 
+  arrange(desc(date))
+```
+
+
+```{r Forms and Averages}
+library(zoo)
+n <- 3
+
+form_df <- data_clean |> 
+  mutate(season = year(date)) |> 
+  pivot_longer(cols = home_team:away_team,
+               names_to = "home_away", values_to = "team") |> 
+  mutate(point_diff = ifelse(home_away == "home", home_score - away_score, away_score - home_score),
+         point_scored = ifelse(home_away == "home", home_score, away_score),
+         point_against = ifelse(home_away == "home", away_score, home_score)) |> 
+  select(home_away,team, date, match_id, season, point_diff, point_scored, point_against) |> 
+  arrange(team, date, match_id) |> 
+  group_by(team) |> 
+  mutate(form_point_diff = lag(rollsum(point_diff, n, fill = NA, align = "right"), n = 1),
+         form_point_scored = lag(rollsum(point_scored, n, fill = NA, align = "right"), n = 1),
+         form_point_against = lag(rollsum(point_against, n, fill = NA, align = "right"), n = 1),
+         avg_point_scored = lag(cumsum(point_scored)/seq_along(point_scored)),
+         avg_point_against = lag(cumsum(point_against)/seq_along(point_against))) |> 
+  ungroup() |> 
+  group_by(team, season) |> 
+  mutate(season_avg_point_diff = lag(cumsum(point_diff)/seq_along(point_diff)),
+         season_avg_point_scored = lag(cumsum(point_scored)/seq_along(point_scored)),
+         season_avg_point_against = lag(cumsum(point_against)/seq_along(point_against))) |> 
+  ungroup() |> 
+  pivot_wider(id_cols = date:season, 
+              names_from = home_away, values_from = c(team, point_diff:season_avg_point_against),
+              names_glue = "{home_away}_{.value}") |> 
+  rename_with(~ gsub("^home_team_", "home_", .x), starts_with("home_team")) |> 
+  rename_with(~ gsub("^away_team_", "away_", .x), starts_with("away_team"))
+```
+
+
+```{r Final Dataset}
+feature_df <- data_clean |> 
+  left_join(elo_df, by = c("date", "home_team", "away_team", "match_id")) |> 
+  left_join(form_df, by = c("date", "home_team", "away_team", "match_id"))
+
+write.csv(feature_df, here("Data/Processed/feature_engineered.csv"), row.names = FALSE)
+```
+
+```{r}
+knitr::purl(here("Scripts/feature_engineering.Rmd"), output = here("Scripts/02_feature_engineering_script.R"), documentation = 0)
+```
+
+
+

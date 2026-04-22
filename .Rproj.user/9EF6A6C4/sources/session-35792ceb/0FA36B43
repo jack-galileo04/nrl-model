@@ -1,0 +1,27 @@
+{
+    "id": "0FA36B43",
+    "path": "~/Projects/Modelling/nrl-model/Scripts/modelling_nrlR.Rmd",
+    "project_path": "Scripts/modelling_nrlR.Rmd",
+    "type": "r_markdown",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1776522113128.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "257,0",
+        "scrollLine": "223",
+        "last_setup_crc32": "35792ceb5f56da54"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1776860887,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1776860887336,
+    "read_only": false,
+    "read_only_alternatives": []
+}

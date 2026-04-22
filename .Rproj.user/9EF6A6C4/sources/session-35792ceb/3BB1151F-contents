@@ -1,0 +1,286 @@
+
+```{r}
+library(brms)
+
+priors <- c(
+  prior(normal(log(20), 0.5), class = "Intercept"),
+
+  prior(normal(0.11, 0.11), class = "b", coef = "is_home"),
+
+  prior(normal(0, 0.02), class = "b", coef = "R_diff"),
+
+  prior(exponential(3), class = "sd"),
+  
+  prior(inv_gamma(0.4, 0.3), class = "shape")  # Modern method
+)
+
+
+fit <- brm(
+  score ~ 1 + is_home + R_diff +
+    (1 | team) +          # attack (a_team)
+    (1 | opponent),      # opponent effect
+  data = model_data_long,
+  family = negbinomial(),
+  prior = priors,
+  chains = 4, cores = 4, iter = 4000,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+```
+```{r}
+# Sample Diagnostics
+
+summary(fit)
+# Rhats ok
+# Bulk and Tail ESS ok
+```
+
+```{r, fig.height = 10, fig.width = 12}
+plot(fit)
+```
+
+```{r}
+# Posterior Predictive Checks
+
+pp_check(fit)
+pp_check(fit, type = "error_hist", ndraws = 11)
+pp_check(fit, type = "scatter_avg", ndraws = 100)
+# Mostly moded around 15 ish
+# Big scores can happen and these are reallistic
+```
+
+```{r}
+# Team attack and defence strengths
+library(tidybayes)
+
+attack <- ranef(fit)$team[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team") |>
+  rename(
+    att_mean = Estimate,
+    att_lo = Q2.5,
+    att_hi = Q97.5
+  )
+
+defence <- ranef(fit)$opponent[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team") |>
+  rename(
+    def_mean_raw = Estimate,
+    def_lo_raw = Q2.5,
+    def_hi_raw = Q97.5
+  ) |>
+  mutate(
+    def_mean = -def_mean_raw,
+    def_lo   = -def_hi_raw,
+    def_hi   = -def_lo_raw
+  )
+```
+
+```{r}
+# Ranked attack plot
+
+attack |>
+  mutate(team = reorder(team, att_mean)) |>
+  ggplot(aes(att_mean, team)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = att_lo, xmax = att_hi), height = 0) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Team attack strength (log scale)",
+    x = "Attack effect (log points)",
+    y = NULL
+  )
+
+# Over the course of the past 10 years, this makes sense. Not necessarily to date.
+```
+```{r}
+# Ranked defence plot
+
+defence |>
+  mutate(team = reorder(team, def_mean)) |>
+  ggplot(aes(def_mean, team)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = def_lo, xmax = def_hi), height = 0) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Team defence strength (log scale)",
+    x = "Defence effect (log points)",
+    y = NULL
+  )
+
+# Over the course of the past 10 years, this makes sense. Not necessarily to date.
+```
+
+
+```{r}
+# Attack vs defence
+
+attack |>
+  left_join(defence, by = "team") |>
+  ggplot(aes(att_mean, def_mean, label = team)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Attack strength",
+    y = "Defensive strength",
+    title = "Team profiles: attack vs defence"
+  )
+
+# Not perfect correlation which is good
+```
+
+```{r}
+# Home advantage and roster effects
+
+fixef(fit)
+# Having a roster strength advantage is less important than home ground advantage.
+
+exp(fixef(fit)["is_home", "Estimate"])     # home multiplier
+exp(fixef(fit)["R_diff",  "Estimate"])     # per 1 SD roster edge
+
+# 7% multiplicative boost in roster differences (given teams are already accounted for), if scale is 1
+# 12% boost by home advantage.
+```
+```{r}
+model_data_random_walk <- model_data_long |> 
+  arrange(date) |> 
+  mutate(
+    time_idx = as.integer(factor(date, ordered = TRUE))
+  ) |> 
+  select(match_id, time_idx, everything(), -date)
+```
+
+
+
+```{r}
+priors_random_walk <- c(
+  prior(normal(log(20), 0.5), class = "Intercept"),
+
+  prior(normal(0.11, 0.11), class = "b", coef = "is_home"),
+
+  prior(normal(0, 0.02), class = "b", coef = "R_diff"),
+
+  prior(exponential(3), class = "sd"),
+  
+  prior(exponential(5), class = "sd", group = "team:time_idx"),
+  prior(exponential(5), class = "sd", group = "opponent:time_idx"),
+
+  
+  prior(inv_gamma(0.4, 0.3), class = "shape")  # Modern method
+)
+
+
+fit_random_walk <- brm(
+  score ~ 1 + is_home + R_diff +
+    (1 | team) +          # attack (a_team)
+    (1 | opponent) +
+    (1 | team:time_idx) + 
+    (1 | opponent:time_idx),      # opponent effect
+  data = model_data_random_walk,
+  family = negbinomial(),
+  prior = priors_random_walk,
+  chains = 4, cores = 4, iter = 4000,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+```
+
+```{r}
+summary(fit_random_walk)
+```
+
+```{r}
+plot(fit_random_walk)
+```
+
+```{r}
+# Posterior Predictive Checks
+
+pp_check(fit_random_walk)
+pp_check(fit_random_walk, type = "error_hist", ndraws = 11)
+pp_check(fit_random_walk, type = "scatter_avg", ndraws = 100)
+# Mostly moded around 15 ish
+# Big scores can happen and these are reallistic
+```
+
+```{r}
+# Team attack and defence strengths with time
+
+attack_time <- ranef(fit_random_walk)$`team:time_idx`[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team_time") |>
+  rename(
+    att_mean = Estimate,
+    att_lo = Q2.5,
+    att_hi = Q97.5
+  ) |> 
+  separate(col = team_time, into = c("team", "time"), sep = "_"
+
+defence_time <- ranef(fit_random_walk)$`opponent:time_idx`[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team_time") |>
+  rename(
+    def_mean_raw = Estimate,
+    def_lo_raw = Q2.5,
+    def_hi_raw = Q97.5
+  ) |>
+  mutate(
+    def_mean = -def_mean_raw,
+    def_lo   = -def_hi_raw,
+    def_hi   = -def_lo_raw
+  ) |> 
+  separate(col = team_time, into = c("team", "time"), sep = "_")
+```
+
+```{r}
+attack_time |> 
+  mutate(team = as_factor(team),
+  time = as.integer(time)) |> 
+  left_join(attack |> select(team, att_mean_base = att_mean), by = "team") |> 
+  left_join(
+    model_data_long |> 
+      arrange(date) |> 
+      mutate(
+        time = as.integer(factor(date, ordered = TRUE)),
+        R_diff = 0.07278443 * R_diff
+        ) |> 
+      select(team, time, R_diff, date),
+    by = c("team", "time")) |> 
+  arrange(team, time) |> 
+  mutate(overall_att_mean = att_mean_base + att_mean) |> 
+  mutate(overall_squad_att_mean = overall_att_mean + R_diff) |> 
+  ggplot(aes(date, overall_squad_att_mean, colour = team)) +
+  geom_line() 
+```
+
+
+```{r}
+# Ranked attack plot
+
+attack |>
+  mutate(team = reorder(team, att_mean)) |>
+  ggplot(aes(att_mean, team)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = att_lo, xmax = att_hi), height = 0) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Team attack strength (log scale)",
+    x = "Attack effect (log points)",
+    y = NULL
+  )
+
+# Over the course of the past 10 years, this makes sense. Not necessarily to date.
+```
+
+```{r}
+# Home advantage and roster effects
+
+fixef(fit_random_walk)
+# Having a roster strength advantage is less important than home ground advantage.
+
+exp(fixef(fit)["is_home", "Estimate"])     # home multiplier
+exp(fixef(fit)["R_diff",  "Estimate"])     # per 1 SD roster edge
+
+# 7% multiplicative boost per STDEV in roster differences (given teams are already accounted for)
+# 12% boost by home advantage.
+```

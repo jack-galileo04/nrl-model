@@ -1,0 +1,140 @@
+---
+title: "evaulation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(here)
+
+model_data <- read.csv(here("Data/Processed/feature_engineered.csv")) |> 
+  select(result, everything()) |> 
+  mutate(result = factor(result), result == ifelse(result == "H", "H", "A")) |> 
+  mutate(date = as_date(date))
+```
+
+```{r Tune Results xgb}
+
+xgb_tune_res <- readRDS(here("Outputs/Models/xgb_tune_res.rds"))
+
+xgb_tune_res |> collect_metrics()
+xgb_tune_res |> show_best(metric = "mn_log_loss")
+xgb_best_logloss <- xgb_tune_res |> select_best(metric = "mn_log_loss")
+
+p <- xgb_tune_res |> 
+  collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  select(mean, mtry:sample_size) |> 
+  pivot_longer(mtry:sample_size,
+               names_to = "parameter",
+               values_to = "value") |> 
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point() +
+  facet_wrap(~parameter, scales = "free_x")
+
+ggsave(plot = p, filename = here("Outputs/Plots/xgb_tune_results.png"))
+
+# Low loss reduction, 0.004 or above for learn rate
+```
+
+```{r Tune Results Random Forest}
+
+rf_tune_res <- readRDS(here("Outputs/Models/rf_tune_res.rds"))
+
+rf_tune_res |> collect_metrics()
+rf_tune_res |> show_best(metric = "mn_log_loss")
+rf_best_logloss <- rf_tune_res |> select_best(metric = "mn_log_loss")
+
+p <- rf_tune_res |> 
+  collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  select(mean, mtry:min_n) |> 
+  pivot_longer(mtry:min_n,
+               names_to = "parameter",
+               values_to = "value") |> 
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point() +
+  facet_wrap(~parameter, scales = "free_x")
+
+ggsave(plot = p, filename = here("Outputs/Plots/rf_tune_results.png"))
+
+# Higher min_n (>10), lower mtry? Interesting
+```
+
+```{r Tune Results Lasso Regression}
+
+lasso_tune_res <- readRDS(here("Outputs/Models/lasso_tune_res.rds"))
+
+lasso_tune_res |> collect_metrics()
+lasso_tune_res |> show_best(metric = "mn_log_loss")
+lasso_best_logloss <- lasso_tune_res |> select_best(metric = "mn_log_loss")
+
+p <- lasso_tune_res |> 
+  collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  select(mean, penalty) |> 
+  ggplot(aes(penalty, mean)) +
+  geom_point()
+
+ggsave(plot = p, filename = here("Outputs/Plots/lasso_tune_results.png"))
+
+# Lower lambda does best
+```
+
+```{r Variable Importance}
+
+library(vip)
+
+final_xgb <- readRDS(here("Outputs/Models/final_xgb_fit.rds"))
+
+p <- vip(final_xgb, num_features = 20)
+
+ggsave(plot = p, filename = here("Outputs/Plots/xgb_variable_importance_plot.png"))
+```
+
+```{r Stacked Ensamble Results}
+
+stack_res <- readRDS(here("Outputs/Models/stack_res.rds"))
+
+stack_res |> collect_metrics() |> arrange(.metric)
+best_logloss <- stack_res |> select_best(metric = "mn_log_loss")
+```
+
+```{r Final Ensamble Metrics}
+
+final_stack_fit <- readRDS(here("Outputs/Models/final_stack_fit.rds"))
+
+final_metrics <- collect_metrics(final_stack_fit) |> 
+  select(metric = .metric, estimate = .estimate) |> 
+  pivot_wider(names_from = metric, values_from = estimate)
+```
+
+```{r Final Log Loss}
+
+readRDS(here("Outputs/Models/xgb_tune_res_2026-02-20.rds")) |> 
+  show_best(metric = "mn_log_loss", n = 1)
+```
+
+```{r}
+knitr::purl(here("Scripts/evaluation.Rmd"), output = here("Scripts/04_evaluation_script.R"), documentation = 0)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

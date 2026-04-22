@@ -1,0 +1,5 @@
+"0",""
+"0","player_df |> "
+"0","  group_by(tries) |>"
+"0","  summarise(density = n()/nrow(player_df)) |> "
+"0","  bind_cols(pois |> select(density))"

@@ -1,0 +1,27 @@
+{
+    "id": "5493125D",
+    "path": "~/Projects/Modelling/nrl-model/Scripts/pipeline_nrlR.Rmd",
+    "project_path": "Scripts/pipeline_nrlR.Rmd",
+    "type": "r_markdown",
+    "hash": "4091582591",
+    "contents": "",
+    "dirty": false,
+    "created": 1776832297612.0,
+    "source_on_save": false,
+    "relative_order": 4,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "463,0",
+        "scrollLine": "456",
+        "last_setup_crc32": "35792cebc43ac6a6"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1776860944,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1776860947166,
+    "read_only": false,
+    "read_only_alternatives": []
+}

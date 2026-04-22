@@ -1,0 +1,27 @@
+{
+    "id": "2673DD63",
+    "path": "~/Projects/Analysis-NRL/Scripts/nrl_ausbet_features.Rmd",
+    "project_path": "Scripts/nrl_ausbet_features.Rmd",
+    "type": "r_markdown",
+    "hash": "3319230979",
+    "contents": "",
+    "dirty": false,
+    "created": 1763962974076.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "124,20",
+        "scrollLine": "103",
+        "last_setup_crc32": "ed9213cef130a645"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1763966520,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1764063962458,
+    "read_only": false,
+    "read_only_alternatives": []
+}

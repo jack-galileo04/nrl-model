@@ -1,0 +1,235 @@
+---
+title: "feature_engineering_nrlR"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(readxl)
+library(elo)
+
+n <- 5 # Number of matches for form
+
+ladder_df <- read_csv(here("Data/Raw/Ladder Data.csv"), col_select = -1) |> 
+  mutate(team = ifelse(team == "Wests Tigers", "Tigers", team),
+         team = ifelse(team == "Sea Eagles", "Eagles", team))
+player_df <- read_csv(here("Data/Raw/Player Data.csv"), col_select = -1) |> 
+  mutate(utc_start = as_date(utc_start))
+team_df <- read_csv(here("Data/Raw/Team Data.csv"), col_select = -1) |> 
+  mutate(utc_start = as_date(utc_start))
+```
+
+
+```{r}
+# Days Rest
+
+team_and_recovery_df <- team_df |> 
+  select(competition_id, match_id, round, utc_start, team_name, team_location, score) |> 
+  group_by(competition_id, team_name) |> 
+  arrange(team_name, utc_start) |> 
+  mutate(days_rest = as.numeric(utc_start - lag(utc_start))) |> 
+  ungroup() |> 
+  select(days_rest) |> 
+  bind_cols(team_df) |> 
+  mutate(team = str_extract(team_name, "\\w+$")) |> 
+  mutate(season = year(utc_start)) |> 
+  left_join(ladder_df, by = c("team", "season", "round")) |> 
+  select(-team, -season) |> 
+  rename(ladder_points_for = points_for, ladder_points_against = points_against, ladder_points_diff = points_diff)
+```
+
+
+```{r}
+# ELO
+
+elo_input <- team_and_recovery_df |> 
+  select(match_id, round, utc_start, team_name, team_location, score) |> 
+  rename(team = team_name) |> 
+  pivot_wider(
+    names_from = team_location,
+    values_from = c(team, score)
+  ) |> 
+  mutate(
+    result = case_when(
+    score_home > score_away ~ 1,
+    score_home < score_away ~ 0,
+    T ~ 0.5
+  )) |> 
+  arrange(utc_start)
+
+k_logloss <- vector("list", 61)
+
+for(k in 1:60){
+  elo_df <- elo.run(result ~ team_home + team_away, data = elo_input, k = k) |> 
+    as.data.frame() |> 
+    bind_cols(elo_input) |> 
+    select(elo_home = elo.A, elo_away = elo.B, pr_home = p.A, result, team_home, team_away)
+
+  k_logloss[[k]] <- (elo_df |> select(team_home, team_away, pr_home, result) |> 
+    summarise(logloss = -1/n()*sum(result*log(pr_home) + (1-result)*log(1-pr_home))))$logloss
+}
+
+min_k <- which.min(unlist(k_logloss))
+```
+
+```{r}
+# Elo Features
+
+elo_model <- elo.run(result ~ team_home + team_away, data = elo_input, k = min_k) |> 
+  as_tibble() |> 
+  mutate(elo_home = elo.A-update.A, elo_away = elo.B - update.B) |> # This ensures no data leakage
+  select(elo_home, elo_away, pr_home = p.A)
+
+recent_elo_model <- elo.run(result ~ team_home + team_away, data = elo_input, k = 10) |> 
+  as_tibble() |> 
+  mutate(shortelo_home = elo.A-update.A, shortelo_away = elo.B - update.B) |> # This ensures no data leakage
+  select(shortelo_home, shortelo_away, shortpr_home = p.A)
+
+long_elo_model <- elo.run(result ~ team_home + team_away, data = elo_input, k = 40) |> 
+  as_tibble() |> 
+  mutate(longelo_home = elo.A-update.A, longelo_away = elo.B - update.B) |> # This ensures no data leakage
+  select(longelo_home, longelo_away, longpr_home = p.A)
+
+elo_df <- elo_input |> 
+  select(utc_start, team_home, team_away, match_id) |> 
+  bind_cols(elo_model, recent_elo_model, long_elo_model) |> 
+  arrange(desc(utc_start)) |> 
+  pivot_longer(
+    cols = c(team_home, team_away, elo_home, elo_away, shortelo_home, shortelo_away, longelo_home, longelo_away),
+    names_to = c(".value", "team_location"),
+    names_sep = "_"
+  )
+
+lambda <- 0.94
+```
+
+```{r}
+# Combining team data into lagged feeatures
+
+team_recovery_elo_df <- team_and_recovery_df |> 
+  left_join(elo_df |> select(2:10) |> rename(team_name = team), by = c("match_id", "team_name")) |> 
+  mutate(result = score) |> 
+  arrange(utc_start) |> 
+  group_by(team_name) |> 
+  mutate(across(
+    score:goal_line_dropouts,
+    .fns = ~ lag(accumulate(., ~lambda*.x + (1-lambda)*.y ), n=1)
+    )) |> 
+  mutate(across(
+    ladder_points:ladder_position,
+    .fns = ~lag(.x, n = 1)
+  )) |> 
+  select(-team_location.y) |> 
+  rename(team_location = team_location.x) |> 
+  ungroup()
+```
+
+
+```{r}
+# Position Based Involvements - game time minutes
+
+position_minutes_weights <- tribble(
+  ~position, ~w,
+  "Fullback", 1,
+  "Wing", 1,
+  "Centre", 1,
+  "Five-Eighth", 1,
+  "Halfback", 1,
+  "Prop", 0.6,
+  "Hooker", 0.8,
+  "Second Row", 0.75,
+  "Lock", 0.75,
+  "Interchange", 0.4
+)
+```
+
+```{r}
+# Scaled form statistics
+
+lambda <- 0.94
+
+player_forms_df <- player_df |> 
+  unite("name", firstname:surname, sep = "_") |> 
+  mutate(conversion_attempts = ifelse(conversion_attempts == 0, NA, conversion_attempts),
+         penalty_goal_attempts = ifelse(penalty_goal_attempts == 0, NA, penalty_goal_attempts),
+         possessions = ifelse(possessions == 0, NA, possessions)) |> 
+  mutate(goal_kick_ratio = (conversions+penalty_goals) / (conversion_attempts+penalty_goal_attempts)) |> 
+  select(-conversions, -conversion_attempts, -penalty_goals, -penalty_goal_attempts,
+         -runs_hitup, -runs_normal, -runs_hitup_metres, -runs_normal_metres, -tackleds, -handling_errors, -post_contact_metres) |> 
+  left_join(position_minutes_weights, by = "position") |> 
+  mutate(
+    m_per_run=run_metres/runs,tb_per_run=tackle_breaks/runs,lb_per_run=line_breaks/runs,offs_per_run=offloads/runs, # Attacking Runs
+    ta_per_touch=try_assists/possessions,lba_per_touch=line_break_assists/possessions,kick_per_touch=kicks_general_play/possessions,pass_per_touch=passes/possessions,
+      km_per_kick=ifelse(kicks_general_play ==0, NA, kick_metres/kicks_general_play),goals_per_kick=goal_kick_ratio, # Attacking Play-making
+    tries_per_game=tries,err_per_touch=errors/possessions,points_per_game=points, # Attacking Overall
+    tackles_time=tackles/w,saves_per_game=try_saves, # Defensive Work
+    miss_per_t=missed_tackles/tackles,pen_per_t=penalties_conceded/tackles,ineff_per_t=tackles_ineffective/tackles # Defensive Discipline
+  ) |> 
+  select(-goal_kick_ratio,-(12:30)) |> 
+  group_by(player_id) |> 
+  arrange(player_id, utc_start) |> 
+  select(utc_start, name, player_id, team_name, jumper_number, position, squad_id, match_id, competition_id, season, round,
+         team_location, everything()) |> 
+  mutate(across(
+    13:30,
+    .fns = ~ lag(accumulate(., ~lambda*.x + (1-lambda)*.y ), n=1)
+    )) |> 
+  ungroup() |> 
+  group_by(competition_id, round, position) |> 
+  mutate(across(
+    11:28,
+    .fns = ~scale(.x)
+  )) |> 
+  ungroup()
+```
+
+```{r}
+knitr::purl("feature_engineering_nrlR.Rmd", output = "feature_engineering_nrlR.R")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

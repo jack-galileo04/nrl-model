@@ -1,0 +1,952 @@
+---
+title: "modelling_script"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidymodels)
+library(tidyverse)
+library(here)
+
+library(ranger)
+library(rsample)
+
+library(hms)
+```
+
+```{r goals modelling}
+attack_data
+
+set.seed(123)
+cutoff <- as.Date("2024-08-01")
+
+attack_train_data <- attack_data |>  filter(date < cutoff)
+attack_test_data  <- attack_data |>  filter(date >= cutoff)
+
+linreg_spec <- linear_reg() |> 
+  set_engine("lm") |> 
+  set_mode("regression")
+
+metrics_reg <- metric_set(rmse, rsq, mae)
+
+attack_rec <- recipe(ftg ~ ., data = attack_train_data) |> 
+  step_impute_knn(all_numeric_predictors()) |> 
+  step_rm(date, time, team_code) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_nzv(all_predictors()) |> 
+  step_corr(all_numeric_predictors(), threshold = 0.9) |> 
+  step_normalize(all_numeric_predictors())
+
+attack_linreg_wf <- workflow() |> 
+  add_model(linreg_spec) |> 
+  add_recipe(attack_rec)
+
+attack_fit <- fit(attack_linreg_wf, data = attack_train_data)
+
+linreg_train_pred_attack <- predict(attack_fit, attack_train_data) |> 
+  bind_cols(attack_train_data)
+
+linreg_test_pred_attack <- predict(attack_fit, attack_test_data) |> 
+  bind_cols(attack_test_data)
+
+metrics(linreg_test_pred_attack, truth = ftg, estimate = .pred) |> 
+  mutate(data = "test") |> 
+  rbind(metrics(linreg_train_pred_attack, truth = ftg, estimate = .pred) |> 
+          mutate(data = "train"))
+```
+
+```{r conceded modelling}
+defence_data
+
+set.seed(123)
+cutoff <- as.Date("2024-08-01")
+
+defence_train_data <- defence_data |>  filter(date < cutoff)
+defence_test_data  <- defence_data |>  filter(date >= cutoff)
+
+linreg_spec <- linear_reg() |> 
+  set_engine("lm") |> 
+  set_mode("regression")
+
+metrics_reg <- metric_set(rmse, rsq, mae)
+
+defence_rec <- recipe(ftc ~ ., data = defence_train_data) |> 
+  step_impute_knn(all_numeric_predictors()) |> 
+  step_rm(date, time, team_code) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_nzv(all_predictors()) |> 
+  step_corr(all_numeric_predictors(), threshold = 0.9) |> 
+  step_normalize(all_numeric_predictors())
+
+defence_linreg_wf <- workflow() |> 
+  add_model(linreg_spec) |> 
+  add_recipe(defence_rec)
+
+defence_fit <- fit(defence_linreg_wf, data = defence_train_data)
+
+linreg_train_pred_defence <- predict(defence_fit, defence_train_data) |> 
+  bind_cols(defence_train_data)
+
+linreg_test_pred_defence <- predict(defence_fit, defence_test_data) |> 
+  bind_cols(defence_test_data)
+
+metrics(linreg_test_pred_defence, truth = ftc, estimate = .pred) |> 
+  mutate(data = "test") |> 
+  rbind(metrics(linreg_train_pred_defence, truth = ftc, estimate = .pred) |> 
+          mutate(data = "train"))
+```
+
+```{r combining to get xG}
+xg_test_data <- linreg_test_pred_defence |> 
+  select(concede = .pred, date, time, home_away, team) |> 
+  full_join(linreg_test_pred_attack |> 
+              select(goal = .pred, date, time, home_away, team)) |> 
+  select(concede, goal, everything()) |> 
+  pivot_wider(names_from = home_away,
+              values_from = c(concede, goal, team),
+              names_glue = "{home_away}_{.value}") |> 
+  unnest(cols = c(home_concede, away_concede, home_goal, away_goal, home_team, away_team)) |> 
+  mutate(xg_home = (home_goal+away_concede)/2,
+         xg_away = (away_goal+home_concede)/2,
+         xdiff = xg_home-xg_away) |> 
+  select(date, time, home_team, away_team, xg_home, xg_away, xdiff)
+
+xg_train_data <- linreg_train_pred_defence |> 
+  select(concede = .pred, date, time, home_away, team) |> 
+  full_join(linreg_train_pred_attack |> 
+              select(goal = .pred, date, time, home_away, team)) |> 
+  select(concede, goal, everything()) |> 
+  pivot_wider(names_from = home_away,
+              values_from = c(concede, goal, team),
+              names_glue = "{home_away}_{.value}") |> 
+  unnest(cols = c(home_concede, away_concede, home_goal, away_goal, home_team, away_team)) |> 
+  mutate(xg_home = (home_goal+away_concede)/2,
+         xg_away = (away_goal+home_concede)/2,
+         xdiff = xg_home-xg_away) |> 
+  select(date, time, home_team, away_team, xg_home, xg_away, xdiff)
+```
+
+```{r Model Data}
+# To model, impute NAs
+# One-hot encode home_team, away_team, referee
+# Do something with date and time
+# scale numeric values
+# split data
+
+model_data <- eloform_df |>
+  mutate(month = month(date),
+         ftr = factor(ftr, levels = c("H", "D", "A")),
+         home_team = factor(home_team),
+         away_team = factor(away_team),
+         referee = factor(referee)) |> 
+  arrange(date) |> 
+  mutate(month = format(date, "%Y-%m")) |> 
+  rename(xg_home = fthg, xg_away = ftag, xdiff = ftgdiff) |> 
+  select(b365h, b365a, b365d, bmgmh, bmgma, bmgmd, avg_h, avg_a, avg_d, max_h, max_a, max_d)
+
+set.seed(123)
+cutoff <- as.Date("2024-08-01")
+
+train_data <- model_data |>  filter(date < cutoff)
+test_data  <- model_data |>  filter(date >= cutoff)
+test_data <- test_data |> 
+  left_join(xg_test_data, by = c("date", "time", "home_team", "away_team")) |> 
+  select(-xg_home.x, -xg_away.x, -xdiff.x) |> 
+  rename(xg_home = xg_home.y, xg_away = xg_away.y, xdiff = xdiff.y) |> 
+  select(xg_home, xg_away, everything())
+train_data <- train_data |> 
+  left_join(xg_train_data, by = c("date", "time", "home_team", "away_team")) |> 
+  select(-xg_home.x, -xg_away.x, -xdiff.x) |> 
+  rename(xg_home = xg_home.y, xg_away = xg_away.y, xdiff = xdiff.y) |> 
+  select(xg_home, xg_away, everything())
+
+N <- nrow(train_data)
+initial <- floor(0.7*N)
+assess <- floor(0.2*N)
+splits <- 5
+skip <- floor((N - initial - assess) / (splits - 1))
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,   # adjust as needed
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+```
+
+```{r Log Reg}
+# Recipe
+recipe <- recipe(ftr ~ ., data = train_data) |> 
+  step_impute_knn(all_numeric_predictors()) |> 
+  step_rm(date, fthg, ftag, hst, ast, hs, as, ftgdiff, referee) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors())
+
+# Model Spec
+logreg_spec <- logistic_reg(penalty = tune(), mixture = 1) |> 
+  set_engine("glmnet") |> 
+  set_mode("classification")
+
+# Workflow
+wf_logreg_tune <- workflow() |> 
+  add_recipe(recipe) |> 
+  add_model(logreg_spec)
+
+# Tune
+penalty_grid <- grid_regular(
+  penalty(range = c(-4, 0)),
+  levels = 20
+)
+
+set.seed(789)
+logreg_tune_rs <- tune_grid(
+wf_logreg_tune,
+resamples = folds,
+metrics = metric_set(accuracy),
+control = control_resamples(save_pred = TRUE),
+grid = penalty_grid
+)
+
+best_params <- select_best(logreg_tune_rs, metric = "accuracy") # or "roc_auc" or "kap"
+final_wf <- finalize_workflow(wf_logreg_tune, best_params)
+
+# Finalise
+final_fit <- fit(final_wf, data = train_data)
+
+test_preds <- predict(final_fit, test_data, type = "prob") |> 
+  bind_cols(predict(final_fit, test_data)) |> 
+  bind_cols(test_data |>  select(home_team,away_team,ftr, b365h,b365d,b365a,bfdh,bfdd,bfda,bmgmh,bmgmd,bmgma,bvh,bvd,bva,bwh,bwd,bwa,clh,cld,cla,lbh,lbd,lba,psh,psd,psa,
+                                 max_h,max_d,max_a,avg_h,avg_d,avg_a))
+
+my_metrics <- metric_set(accuracy, roc_auc, sens, spec, mn_log_loss)
+my_metrics(test_preds, truth = ftr, estimate = .pred_class, .pred_win)
+
+# Profit if betting on B365
+test_preds |> 
+  mutate(ev_home = .pred_win * max_h - 1,
+         ev_away = .pred_not_win * max_a - 1) |> 
+  mutate(bet_home = ev_home > 0,
+         bet_away = ev_away > 0,
+         profit = case_when(
+           bet_home & ftr == "win" ~ b365h - 1,
+           bet_home & ftr != "win" ~ -1,
+           bet_away & ftr == "not_win" ~ b365a - 1,
+           bet_away & ftr != "not_win" ~ -1,
+           T ~ 0
+         )) |> 
+  summarise(total_profit = sum(profit),
+            total_stacked = sum(bet_home) + sum(bet_away),
+            roi = total_profit/total_stacked)
+```
+
+```{r Rand For}
+recipe <- recipe(ftr ~ ., data = train_data) |>
+  step_rm(date, time, month, hst, ast, hs, as, referee) |> 
+  step_impute_knn(all_numeric_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_YeoJohnson(all_numeric_predictors())
+
+rf_spec <- rand_forest(
+  mtry = tune(),
+  min_n = tune(),
+  trees = 500
+) |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+
+wf_randfor <- workflow() |> 
+  add_model(rf_spec) |> 
+  add_recipe(recipe)
+
+
+rf_grid <- grid_regular(
+  mtry(range = c(2, 8)),
+  min_n(range = c(2, 10)),
+  levels = 5
+)
+
+tune_res <- tune_grid(
+  wf_randfor,
+  resamples = folds,
+  grid = rf_grid,
+  metrics = metric_set(roc_auc, accuracy, mn_log_loss)
+)
+
+collect_metrics(tune_res) |> 
+  group_by(.metric) |> 
+  arrange(.metric, desc(mean))
+best_params_rf <- select_best(tune_res, metric = "mn_log_loss")
+final_wf_rf <- finalize_workflow(wf_randfor, best_params_rf)
+
+# Finalise
+final_fit_rf <- fit(final_wf_rf, data = train_data)
+
+test_preds_rf <- predict(final_fit_rf, test_data, type = "prob") |> 
+  bind_cols(predict(final_fit_rf, test_data)) |> 
+  bind_cols(test_data |>  select(home_team,away_team,ftr, b365h,b365d,b365a,bfdh,bfdd,bfda,bmgmh,bmgmd,bmgma,bvh,bvd,bva,bwh,bwd,bwa,clh,cld,cla,lbh,lbd,lba,psh,psd,psa,
+                                 max_h,max_d,max_a,avg_h,avg_d,avg_a))
+
+my_metrics <- metric_set(accuracy, roc_auc, sens, spec, mn_log_loss)
+my_metrics(test_preds_rf, truth = ftr, estimate = .pred_class, .pred_H, .pred_D, .pred_A)
+
+# Profit if betting on B365
+test_preds_rf |> 
+  mutate(ev_home = .pred_H * max_h - 1,
+         ev_draw = .pred_D * max_d - 1,
+         ev_away = .pred_A * max_a - 1) |> 
+  mutate(bet_home = ev_home > 0.05,
+         bet_draw = ev_draw > 0.05,
+         bet_away = ev_away > 0.05,
+         profit = case_when(
+           bet_home & ftr == "H" ~ max_h - 1,
+           bet_home & ftr != "H" ~ -1,
+           bet_draw & ftr == "D" ~ max_d - 1,
+           bet_draw & ftr != "D" ~ -1,
+           bet_away & ftr == "A" ~ max_a - 1,
+           bet_away & ftr != "A" ~ -1,
+           T ~ 0
+         )) |> 
+  summarise(total_profit = sum(profit),
+            total_stacked = sum(bet_home) + sum(bet_away),
+            roi = total_profit/total_stacked)
+```
+
+```{r XGBoost}
+recipe <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(date, time, month, referee, home_pr, div, hs, as, hst, ast) |> 
+  step_impute_knn(all_numeric_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_YeoJohnson(all_numeric_predictors())
+
+xg_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune(),
+  mtry = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+xg_wf <- workflow() |> 
+  add_model(xg_spec) |> 
+  add_recipe(recipe)
+
+xg_grid <- grid_space_filling(
+  trees(),
+  tree_depth(),
+  learn_rate(),
+  mtry(range = c(1, 10)),
+  sample_size = sample_prop(),
+  loss_reduction(),
+  size = 20
+)
+
+xg_tune_res <- tune_grid(
+  xg_wf,
+  resamples = folds,
+  grid = xg_grid,
+  metrics = metric_set(roc_auc, accuracy, f_meas, mn_log_loss)
+)
+
+collect_metrics(xg_tune_res) |> 
+  group_by(.metric) |> 
+  arrange(.metric, desc(mean))
+best_params_xg <- select_best(xg_tune_res, metric = "mn_log_loss")
+final_wf_xg <- finalize_workflow(xg_wf, best_params_rf)
+
+# Finalise
+final_fit_xg <- fit(final_wf_xg, data = train_data)
+
+test_preds_xg <- predict(final_fit_xg, 
+                         test_data |> mutate(
+home_team = as.factor(home_team),
+         away_team = as.factor(away_team)), type = "prob") |> 
+  bind_cols(predict(final_fit_xg, test_data)) |> 
+  bind_cols(test_data |>  select(home_team,away_team,ftr, b365h,b365d,b365a,bmgmh,bmgmd,bmgma,max_h,max_d,max_a,avg_h,avg_d,avg_a))
+
+my_metrics <- metric_set(accuracy, roc_auc, sens, spec, mn_log_loss)
+my_metrics(test_preds_rf, truth = ftr, estimate = .pred_class, .pred_H, .pred_D, .pred_A)
+
+# Profit if betting on B365
+test_preds_rf |> 
+  mutate(ev_home = .pred_H * max_h - 1,
+         ev_draw = .pred_D * max_d - 1,
+         ev_away = .pred_A * max_a - 1) |> 
+  mutate(bet_home = ev_home > 0.05,
+         bet_draw = ev_draw > 0.05,
+         bet_away = ev_away > 0.05,
+         profit = case_when(
+           bet_home & ftr == "H" ~ max_h - 1,
+           bet_home & ftr != "H" ~ -1,
+           bet_draw & ftr == "D" ~ max_d - 1,
+           bet_draw & ftr != "D" ~ -1,
+           bet_away & ftr == "A" ~ max_a - 1,
+           bet_away & ftr != "A" ~ -1,
+           T ~ 0
+         )) |> 
+  summarise(total_profit = sum(profit),
+            total_stacked = sum(bet_home) + sum(bet_away),
+            roi = total_profit/total_stacked)
+```
+
+```{r Model Data Sets}
+model_data <- eloform_df |>
+  mutate(month = month(date),
+         ftr = factor(ftr, levels = c("H", "D", "A")),
+         home_team = factor(home_team),
+         away_team = factor(away_team)) |> 
+  arrange(date) |> 
+  mutate(month = format(date, "%Y-%m")) |> 
+  select(ftr, everything())
+bet_cols <- names(model_data)[16:69]
+stat_cols <- names(model_data)[-c((16:69),1)]
+
+set.seed(123)
+cutoff <- as.Date("2024-08-01")
+
+train_data <- model_data |>  filter(date < cutoff)
+test_data  <- model_data |>  filter(date >= cutoff)
+```
+
+
+```{r Match Stats Recipe and Specification}
+xgb_stat_rec <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(all_of(bet_cols),date, time, div, hs, as, hst, ast, fthg, ftag, ftgdiff,
+          position_home, position_away, away_strength, home_strength) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_YeoJohnson(all_numeric_predictors())
+
+xgb_spec <- boost_tree(
+  trees = 1000,
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  sample_size = tune(), mtry = tune(),
+  learn_rate = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+```
+
+```{r Tune Grid and Folds}
+N <- nrow(train_data)
+initial <- nrow(train_data |> filter(date < as.Date("2023-08-01")))
+assess <- nrow(train_data |> filter(date > as.Date("2023-08-01")))
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,   # adjust as needed
+  assess = assess,
+  cumulative = TRUE
+)
+
+xgb_grid_stat <- grid_space_filling(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), train_data),
+  learn_rate(),
+  size = 20
+)
+```
+
+```{r Workflow}
+xgb_wf_stat <- workflow() |> 
+  add_model(xgb_spec) |> 
+  add_recipe(xgb_stat_rec)
+```
+
+```{r Tuning}
+doParallel::registerDoParallel()
+
+set.seed(234)
+xgb_tune_res_stat <- tune_grid(
+  xgb_wf_stat,
+  resamples = folds,
+  grid = xgb_grid_stat,
+  control = control_grid(save_pred = TRUE),
+  metrics = metric_set(mn_log_loss, sens, spec, roc_auc)
+)
+
+collect_metrics(xgb_tune_res_stat) |> 
+  group_by(.metric) |> 
+  arrange(.metric, desc(mean))
+best_params_xg_stat <- select_best(xgb_tune_res, metric = "mn_log_loss")
+```
+
+```{r tuned plots}
+xgb_tune_res_stat |> 
+  collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  select(mean, mtry:sample_size) |> 
+  pivot_longer(mtry:sample_size,
+               names_to = "parameter",
+               values_to = "value") |> 
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point() +
+  facet_wrap(~parameter, scales = "free_x")
+```
+
+```{r}
+xgb_rec <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(date, time, month, div, hs, as, hst, ast, fthg, ftag, ftgdiff,
+          position_home, position_away, away_strength, home_strength,
+          b365ch:max_ca, bfech:bfecaha) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors())
+
+xgb_spec <- boost_tree(
+  trees = 1000,
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  sample_size = tune(), mtry = tune(),
+  learn_rate = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+N <- nrow(train_data)
+assess <- 150
+skip <- 50
+initial <- -(10*50+assess-N)
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+
+xgb_grid <- grid_space_filling(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), train_data),
+  learn_rate(),
+  size = 100
+)
+
+xgb_wf <- workflow() |> 
+  add_model(xgb_spec) |> 
+  add_recipe(xgb_rec)
+
+doParallel::registerDoParallel()
+
+set.seed(234)
+xgb_tune_res <- tune_grid(
+  xgb_wf,
+  resamples = folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE),
+  metrics = metric_set(mn_log_loss, sens, spec, roc_auc)
+)
+
+collect_metrics(xgb_tune_res) |> 
+  group_by(.metric) |> 
+  arrange(.metric, mean)
+
+xgb_tune_res |> 
+  collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  select(mean, mtry:sample_size) |> 
+  pivot_longer(mtry:sample_size,
+               names_to = "parameter",
+               values_to = "value") |> 
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point() +
+  facet_wrap(~parameter, scales = "free_x")
+
+best_logloss_xg <- select_best(xgb_tune_res, metric = "mn_log_loss")
+
+final_xgb_full <- finalize_workflow(xgb_wf, best_logloss_xg)
+
+library(vip)
+
+final_xgb_full |> 
+  fit(data = train_data) |> 
+  pull_workflow_fit() |> 
+  vip(geom = "point")
+```
+
+```{r Random Forest Recipe and Specification}
+randforest_rec <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(time, month, div, hs, as, hst, ast, fthg, ftag, ftgdiff,
+          b365ch:max_ca, bfech:bfecaha) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_date(date, features = "month") |> 
+  step_rm(date)
+
+juiced <- juice(prep(randforest_rec))
+
+randforest_spec<- rand_forest(
+  trees = 1000,
+  mtry = tune(),
+  min_n = tune()
+  ) |> 
+  set_engine("ranger") |> 
+  set_mode("classification")
+```
+
+```{r Workflow}
+randforest_wf <- workflow() |> 
+  add_recipe(randforest_rec) |> 
+  add_model(randforest_spec)
+```
+
+```{r Tune Folds and Grid}
+N <- nrow(train_data)
+assess <- 150
+skip <- 50
+initial <- -(10*50+assess-N)
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,   # adjust as needed
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+
+randforest_grid <- grid_space_filling(
+  min_n(),
+  finalize(mtry(), train_data),
+  size = 30
+)
+
+doParallel::registerDoParallel()
+
+randforest_tune_res <- tune_grid(
+  randforest_wf,
+  resamples = folds,
+  grid = randforest_grid, 
+  control = control_grid(save_pred = TRUE),
+  metrics = metric_set(mn_log_loss)
+)
+
+randforest_tune_res |> collect_metrics()
+
+randforest_tune_res |> 
+  collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  select(mean, mtry, min_n) |> 
+  pivot_longer(mtry:min_n,
+               names_to = "parameter",
+               values_to = "value") |> 
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point() +
+  facet_wrap(~parameter, scales = "free_x")
+```
+
+```{r}
+randforest_grid2 <- grid_regular(
+  mtry(range = c(25, 50)),
+  min_n(range = c(2,8)),
+  levels = 5
+)
+
+set.seed(456)
+randforest_tune_res2 <- tune_grid(
+  randforest_wf,
+  resamples = folds,
+  grid = randforest_grid2,
+  metrics = metric_set(mn_log_loss)
+)
+
+randforest_tune_res2 |> collect_metrics() |> 
+  filter(.metric == "brier_class") |> 
+  ggplot(aes(mtry, mean, colour = factor(min_n))) +
+  geom_point(size = 2) +
+  geom_line(linewidth = 1.1)
+```
+
+
+```{r XGBoost Model (Betting Data), set up and tuning}
+recipe_bet <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(all_of(stat_cols)) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_YeoJohnson(all_numeric_predictors())
+
+xg_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune(),
+  mtry = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+xg_wf_bet <- workflow() |> 
+  add_model(xg_spec) |> 
+  add_recipe(recipe_bet)
+
+N <- nrow(train_data)
+initial <- nrow(train_data |> filter(date < as.Date("2023-08-01")))
+assess <- nrow(train_data |> filter(date > as.Date("2023-08-01")))
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,   # adjust as needed
+  assess = assess,
+  cumulative = TRUE
+)
+
+xg_grid_bet <- grid_space_filling(
+  trees(),
+  tree_depth(),
+  learn_rate(),
+  mtry(range = c(1, 10)),
+  sample_size = sample_prop(),
+  loss_reduction(),
+  size = 20
+)
+
+xg_tune_res_bet <- tune_grid(
+  xg_wf_bet,
+  resamples = folds,
+  grid = xg_grid_bet,
+  metrics = metric_set(roc_auc, accuracy, mn_log_loss)
+)
+
+collect_metrics(xg_tune_res_bet) |> 
+  group_by(.metric) |> 
+  arrange(.metric, desc(mean))
+best_params_xg_bet <- select_best(xg_tune_res_bet, metric = "mn_log_loss")
+
+logreg_recipe_bet <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(all_of(stat_cols)) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_YeoJohnson(all_numeric_predictors())
+```
+
+```{r combined XGboost}
+recipe <- recipe(ftr ~ ., data = train_data) |>
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(date, time, month, div, hs, as, hst, ast, fthg, ftag, ftgdiff) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_string2factor(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_YeoJohnson(all_numeric_predictors())
+
+xg_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  sample_size = tune(),
+  mtry = tune()
+) |> 
+  set_engine("xgboost") |> 
+  set_mode("classification")
+
+xg_wf <- workflow() |> 
+  add_model(xg_spec) |> 
+  add_recipe(recipe)
+
+N <- nrow(train_data)
+initial <- nrow(train_data |> filter(date < as.Date("2023-08-01")))
+assess <- nrow(train_data |> filter(date > as.Date("2023-08-01")))
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,   # adjust as needed
+  assess = assess,
+  cumulative = TRUE
+)
+
+xg_grid <- grid_space_filling(
+  trees(),
+  tree_depth(),
+  learn_rate(),
+  mtry(range = c(1, 10)),
+  sample_size = sample_prop(),
+  loss_reduction(),
+  size = 20
+)
+
+xg_tune_res <- tune_grid(
+  xg_wf,
+  resamples = folds,
+  grid = xg_grid,
+  metrics = metric_set(accuracy, mn_log_loss)
+)
+
+collect_metrics(xg_tune_res) |> 
+  group_by(.metric) |> 
+  arrange(desc(.metric), mean)
+best_params_xg <- select_best(xg_tune_res, metric = "mn_log_loss")
+
+###############################################################################
+final_wf_xg <- finalize_workflow(xg_wf, best_params_xg)
+
+final_fit_xg <- fit(final_wf_xg, data = train_data)
+
+test_preds_xg <- predict(final_fit_xg,
+                         test_data |> mutate(
+                           home_team = as.factor(home_team),
+                           away_team = as.factor(away_team)
+                         ), type = "prob") |> 
+  bind_cols(predict(final_fit_xg, test_data)) |> 
+  bind_cols(test_data |> select(home_team,away_team, ftr, max_ch, max_cd, max_ca))
+
+metrics <- metric_set(mn_log_loss, sens, spec, accuracy)
+metrics(test_preds_xg, truth = ftr, estimate = .pred_class, .pred_H, .pred_D, .pred_A)
+
+bet_size <- 20
+
+test_preds_xg |> 
+  mutate(ev_home = .pred_H * max_ch - 1,
+         ev_away = .pred_A * max_ca - 1,
+         ev_draw = .pred_D * max_cd - 1) |> 
+  mutate(bet = case_when(
+    ev_home > 0.05 ~ "bet_home",
+    ev_away > 0.05 ~ "bet_away",
+    ev_draw > 0.05 ~ "bet_draw",
+    T ~ "no_bet"
+  ),
+         profit = case_when(
+           bet == "bet_home" & ftr == "H" ~ max_ch - 1,
+           bet == "bet_home" & ftr != "H" ~ -1,
+           bet == "bet_away" & ftr == "A" ~ max_ca - 1,
+           bet == "bet_away" & ftr != "A" ~ -1,
+           bet == "bet_draw" & ftr == "D" ~ max_cd - 1,
+           bet == "bet_draw" & ftr != "D" ~ -1,
+           T ~ 0
+         )) |> 
+  mutate(profit = bet_size*profit) |> # Amount of money on each bet
+  filter(bet != "no_bet") |> 
+  summarise(total_profit = sum(profit),
+            total_staked = n()*bet_size,
+            roi = total_profit/total_staked)
+```
+
+```{r combined finalised}
+final_wf_xg_stat <- finalize_workflow(xg_wf_stat, best_params_xg_stat)
+final_wf_xg_bet <- finalize_workflow(xg_wf_bet, best_params_xg_bet)
+
+final_fit_xg_stat <- fit(final_wf_xg_stat, data = train_data)
+final_fit_xg_bet <- fit(final_wf_xg_bet, data = train_data)
+
+test_preds_xg_stat <- predict(final_fit_xg_stat,
+        test_data |> mutate(
+          home_team = as.factor(home_team),
+          away_team = as.factor(away_team)), type = "prob") |> 
+  bind_cols(predict(final_fit_xg_stat, test_data)) |> 
+  bind_cols(test_data |> select(home_team,away_team, ftr, max_h, max_d, max_a))
+
+my_metrics <- metric_set(accuracy, roc_auc, sens, spec, mn_log_loss)
+my_metrics(test_preds_xg_bet, truth = ftr, estimate = .pred_class, .pred_home_win)
+
+test_preds_xg_bet <- predict(final_fit_xg_bet, 
+                         test_data |> mutate(
+home_team = as.factor(home_team),
+         away_team = as.factor(away_team)), type = "prob") |> 
+  bind_cols(predict(final_fit_xg_bet, test_data)) |> 
+  bind_cols(test_data |>  select(home_team,away_team,ftr,max_h,max_d,max_a))
+
+# Profit bet data
+test_preds_xg_bet |> 
+  mutate(ev_home = .pred_home_win * max_h - 1) |> 
+  mutate(bet = case_when(
+    ev_home > 0.05 ~ "bet_home",
+    T ~ "no_bet"
+  ),
+         profit = case_when(
+           bet == "bet_home" & ftr == "home_win" ~ max_h - 1,
+           bet == "bet_home" & ftr != "home_win" ~ -1,
+           T ~ 0
+         )) |> 
+  summarise(total_profit = sum(profit),
+            total_stacked = count(bet),
+            roi = total_profit/total_stacked)
+
+# Profit, stat data
+test_preds_xg_stat |> 
+  mutate(ev_home = .pred_home_win * max_h - 1) |> 
+  mutate(bet = case_when(
+    ev_home > 0.05 ~ "bet_home",
+    T ~ "no_bet"
+  ),
+         profit = case_when(
+           bet == "bet_home" & ftr == "home_win" ~ max_h - 1,
+           bet == "bet_home" & ftr != "home_win" ~ -1,
+           T ~ 0
+         )) |> 
+  filter(bet == "bet_home") |> 
+  summarise(total_profit = sum(profit),
+            total_stacked = n(),
+            roi = total_profit/total_stacked)
+
+combined_preds <- test_preds_xg_bet |> 
+  rename(pr_home_win_bet_data = .pred_home_win) |> 
+  bind_cols(test_preds_xg_stat |> select(pr_home_win_stat_data = .pred_home_win)) |> 
+  select(pr_home_win_bet_data, pr_home_win_stat_data, everything(), - .pred_home_not_win)
+
+
+tuning_weight_df <- combined_preds |> 
+  select(pr_home_win_bet_data, pr_home_win_stat_data, .pred_class, ftr)
+
+library(Metrics)
+compute_log_loss <- function(w, df) {
+  blended <- tibble(
+    
+  )
+}
+
+blended = w*tuning_weight_df$pr_home_win_bet_data + (1-w)*tuning_weight_df$pr_home_win_stat_data
+
+outcomes <- tuning_weight_df$ftr == ifelse(blended > 0.5, "home_win", "home_not_win")
+sum(outcomes)/length(outcomes)
+
+weight_tune_res = numeric(100)
+for(w in seq(0,1,by = 0.01)){
+  blended = w*tuning_weight_df$pr_home_win_bet_data + (1-w)*tuning_weight_df$pr_home_win_stat_data
+  preds = ifelse(blended > 0.5, "home_win", "home_not_win")
+  outcomes = tuning_weight_df$ftr == preds
+  accuracy = sum(outcomes)/length(outcomes)
+  weight_tune_res[100*w+1] = accuracy
+}
+plot(seq(0,1,by=0.01), weight_tune_res)
+
+```

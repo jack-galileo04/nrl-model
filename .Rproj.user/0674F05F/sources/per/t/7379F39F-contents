@@ -1,0 +1,35 @@
+library(jsonlite)
+library(tidyverse)
+
+url.24.player <- "https://geo145327-staging.s3.ap-southeast-2.amazonaws.com/public/player_statistics_2024.json"
+url.24.match <- "https://geo145327-staging.s3.ap-southeast-2.amazonaws.com/public/nrl_data_2024.json"
+url.23.player <- "https://geo145327-staging.s3.ap-southeast-2.amazonaws.com/public/player_statistics_2023.json"
+url.08_23.match <- "https://geo145327-staging.s3.ap-southeast-2.amazonaws.com/public/nrl_data_multi_years_2.json"
+
+frl.24.player <- fromJSON(url.24.player)
+frl.24.match <- fromJSON(url.24.match)
+frl.23.player <- fromJSON(url.23.player)
+frl.08_23.match <- fromJSON(url.08_23.match)
+
+df_frl.24.player <- frl.24.player[[1]]
+
+unnest_recursive <- function(data) {
+  # Base case: if the data is not a data frame, return it as is
+  if (!is.data.frame(data)) {
+    return(data)
+  }
+  # Unnest data frame columns
+  data <- data %>%
+    mutate(across(everything(), ~ if (is.list(.)) unnest_recursive(.) else .)) %>% 
+    unnest(cols = everything(), keep_empty = TRUE) # Combine all unnested data frames
+  
+  return(data)
+}
+
+
+
+
+
+
+
+

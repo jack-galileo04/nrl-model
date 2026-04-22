@@ -1,0 +1,9 @@
+"0","log_experiment(algorithm = ""xgb"",
+               feature_set = ""include lineup forms, elso, rest days, field position, possession"",
+               resample_scheme = ""5 cv folds"",
+               logloss = xgb_logloss,
+               notes = """")
+"
+"2","Error: Cannot open file for writing:
+* 'C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Outputs/experiments_log.csv'
+"

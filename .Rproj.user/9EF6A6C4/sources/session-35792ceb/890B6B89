@@ -1,0 +1,27 @@
+{
+    "id": "890B6B89",
+    "path": "~/Projects/Modelling/nrl-model/Scripts/nrlR_original_fetch.Rmd",
+    "project_path": "Scripts/nrlR_original_fetch.Rmd",
+    "type": "r_markdown",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1776829688363.0,
+    "source_on_save": false,
+    "relative_order": 1,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "142,0",
+        "scrollLine": "112",
+        "last_setup_crc32": "35792ceb2999e250"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1776860854,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1776860854215,
+    "read_only": false,
+    "read_only_alternatives": []
+}

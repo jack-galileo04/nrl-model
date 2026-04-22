@@ -1,0 +1,590 @@
+---
+title: "feature_engineering_nrlR"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(here)
+library(readxl)
+
+library(zoo)
+library(slider)
+
+n <- 5 # Number of matches for form
+
+ladder_df <- read_csv(here("Data/Raw/Ladder Data.csv"), col_select = -1)
+player_df <- read_csv(here("Data/Raw/Player Data.csv"), col_select = -1)
+team_df <- read_csv(here("Data/Raw/Team Data.csv"), col_select = -1)
+
+player_df <- player_df |> 
+  mutate(utc_start = as_date(utc_start))
+team_df <- team_df |> 
+  mutate(utc_start = as_date(utc_start))
+```
+
+```{r}
+# Goal: elos, days of recovery, Squad strengths
+```
+
+```{r}
+# Days Rest
+
+team_and_recovery_df <- team_df |> 
+  select(competition_id, match_id, round, utc_start, team_name, team_location, score) |> 
+  group_by(competition_id, team_name) |> 
+  arrange(team_name, utc_start) |> 
+  mutate(days_rest = as.numeric(utc_start - lag(utc_start))) |> 
+  ungroup() |> 
+  select(days_rest) |> 
+  bind_cols(team_df)
+```
+
+```{r}
+# ELO
+
+
+
+
+```
+
+
+
+```{r}
+# Position Based Involvements - game time minutes
+
+position_minutes_weights <- tribble(
+  ~position, ~w,
+  "Fullback", 1,
+  "Wing", 1,
+  "Centre", 1,
+  "Five-Eighth", 1,
+  "Halfback", 1,
+  "Prop", 0.6,
+  "Hooker", 0.8,
+  "Second Row", 0.75,
+  "Lock", 0.75,
+  "Interchange", 0.4
+)
+```
+
+```{r}
+# Scaled form statistics
+
+library(qcc) ; lambda <- 0.94
+
+player_forms_df <- player_df |> 
+  unite("name", firstname:surname, sep = "_") |> 
+  mutate(conversion_attempts = ifelse(conversion_attempts == 0, NA, conversion_attempts),
+         penalty_goal_attempts = ifelse(penalty_goal_attempts == 0, NA, penalty_goal_attempts),
+         possessions = ifelse(possessions == 0, NA, possessions)) |> 
+  mutate(goal_kick_ratio = (conversions+penalty_goals) / (conversion_attempts+penalty_goal_attempts)) |> 
+  select(-conversions, -conversion_attempts, -penalty_goals, -penalty_goal_attempts,
+         -runs_hitup, -runs_normal, -runs_hitup_metres, -runs_normal_metres, -tackleds, -handling_errors, -post_contact_metres) |> 
+  left_join(position_minutes_weights, by = "position") |> 
+  mutate(
+    m_per_run=run_metres/runs,tb_per_run=tackle_breaks/runs,lb_per_run=line_breaks/runs,offs_per_run=offloads/runs, # Attacking Runs
+    ta_per_touch=try_assists/possessions,lba_per_touch=line_break_assists/possessions,kick_per_touch=kicks_general_play/possessions,pass_per_touch=passes/possessions,
+      km_per_kick=ifelse(kicks_general_play ==0, NA, kick_metres/kicks_general_play),goals_per_kick=goal_kick_ratio, # Attacking Play-making
+    tries_per_game=tries,err_per_touch=errors/possessions,points_per_game=points, # Attacking Overall
+    tackles_time=tackles/w,saves_per_game=try_saves, # Defensive Work
+    miss_per_t=missed_tackles/tackles,pen_per_t=penalties_conceded/tackles,ineff_per_t=tackles_ineffective/tackles # Defensive Discipline
+  ) |> 
+  select(-goal_kick_ratio,-(12:30)) |> 
+  group_by(player_id) |> 
+  arrange(player_id, utc_start) |> 
+  select(utc_start, name, player_id, team_name, jumper_number, position, squad_id, match_id, competition_id, season, round,
+         team_location, everything()) |> 
+  mutate(across(
+    13:30,
+    .fns = ~ lag(accumulate(., ~lambda*.x + (1-lambda)*.y ), n=1)
+    )) |> 
+  ungroup() |> 
+  group_by(competition_id, round, position) |> 
+  mutate(across(
+    11:28,
+    .fns = ~scale(.x)
+  )) |> 
+  ungroup()
+```
+
+```{r}
+# Group statistics into channels (work about better weighted average)
+
+player_channels_df <- player_forms_df |> 
+  rowwise() |> 
+  mutate(
+    att_runs = mean(c(m_per_run,tb_per_run,lb_per_run,offs_per_run), na.rm = TRUE),
+    att_plays = mean(c(ta_per_touch,lba_per_touch,kick_per_touch,pass_per_touch,km_per_kick,goals_per_kick), na.rm = TRUE),
+    att_overall = mean(c(tries_per_game,-err_per_touch,points_per_game), na.rm = TRUE),
+    def_work = mean(c(tackles_time,saves_per_game), na.rm = TRUE),
+    def_disc = mean(c(miss_per_t,pen_per_t,ineff_per_t), na.rm = TRUE)
+  ) |> 
+  ungroup() |> 
+  select(-(13:31)) |> 
+  group_by(competition_id, round, position) |> 
+  mutate(across(
+    10:13,
+    .fns = ~scale(.x)
+  )) |> 
+  ungroup() |> 
+  left_join(team_and_recovery_df |> select(match_id, team_name, score), by = c("match_id", "team_name"))
+```
+
+```{r}
+# Gauging general importance of each channel for scoring
+
+channel_effects_df <- player_channels_df |> 
+  group_by(match_id, team_name) |> 
+  reframe(
+    across(11:15, ~ mean(.x, na.rm = TRUE)),
+    score = first(score),
+    date = first(utc_start),
+    team_location = first(team_location)
+  ) |> 
+  drop_na() |> 
+  arrange(match_id) |> 
+  group_by(match_id) |> 
+  mutate(opponent_score = rev(score),
+         score_diff = score - opponent_score) |> 
+  ungroup()
+
+lm_fit_att <- lm(sqrt(score) ~  def_disc + att_runs + att_plays + att_overall + def_work, data = channel_effects_df)
+summary(lm_fit_att) # att_overall > att_runs > att_plays
+lm_fit_def <- lm(sqrt(opponent_score) ~  def_disc + att_runs + att_plays + att_overall + def_work, data = channel_effects_df)
+summary(lm_fit_def) # att_overal > att_runs > att_plays > def_work
+lm_fit_diff <- lm(sqrt(score_diff) ~  def_disc + att_runs + att_plays + att_overall + def_work, data = channel_effects_df)
+summary(lm_fit_diff) # att_overal > att_runs > att_plays > def_work
+# Defensive work appears to be a negative (less posession etc)
+
+channel_effects_df |> 
+  summarise(mean_score = mean(score))
+
+channel_effects_df |> 
+  group_by(team_location) |> 
+  summarise(mean_score = mean(score))
+```
+
+```{r}
+
+model_data <- channel_effects_df |> 
+  select(-opponent_score, -score_diff) |> 
+  mutate(
+    roster_strength = 0.4 * att_overall + 0.2 * att_runs + 0.2 * att_plays - 0.15 * def_work + 0.05 * def_disc
+    ) |> 
+  select(match_id, date, team = team_name, score, team_location, roster_strength) |> 
+  pivot_wider(
+    names_from = team_location,
+    values_from = c(score, team, roster_strength)
+  ) |> 
+  mutate(
+    team_away = factor(team_away),
+    team_home = factor(team_home),
+    match_id = factor(match_id),
+    R_diff_home = scale(roster_strength_home - roster_strength_away),
+    R_diff_away = scale(roster_strength_away - roster_strength_home),
+    HA = 1
+  ) |> 
+  select(-roster_strength_home, roster_strength_away) |> 
+  drop_na()
+
+model_data_long <- bind_rows(
+  model_data |> 
+    transmute(
+      match_id,
+      date,
+      team = team_home,
+      opponent = team_away,
+      score = score_home,
+      is_home = 1L,
+      R_diff = R_diff_home
+    ),
+  model_data |> 
+    transmute(
+      match_id,
+      date,
+      team = team_away,
+      opponent = team_home,
+      score = score_away,
+      is_home = 0L,
+      R_diff = R_diff_away
+    )
+)
+```
+
+
+```{r}
+library(brms)
+
+priors <- c(
+  prior(normal(log(20), 0.5), class = "Intercept"),
+
+  prior(normal(0.11, 0.11), class = "b", coef = "is_home"),
+
+  prior(normal(0, 0.02), class = "b", coef = "R_diff"),
+
+  prior(exponential(3), class = "sd"),
+  
+  prior(inv_gamma(0.4, 0.3), class = "shape")  # Modern method
+)
+
+
+fit <- brm(
+  score ~ 1 + is_home + R_diff +
+    (1 | team) +          # attack (a_team)
+    (1 | opponent),      # opponent effect
+  data = model_data_long,
+  family = negbinomial(),
+  prior = priors,
+  chains = 4, cores = 4, iter = 4000,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+```
+```{r}
+# Sample Diagnostics
+
+summary(fit)
+# Rhats ok
+# Bulk and Tail ESS ok
+```
+
+```{r, fig.height = 10, fig.width = 12}
+plot(fit)
+```
+
+```{r}
+# Posterior Predictive Checks
+
+pp_check(fit)
+pp_check(fit, type = "error_hist", ndraws = 11)
+pp_check(fit, type = "scatter_avg", ndraws = 100)
+# Mostly moded around 15 ish
+# Big scores can happen and these are reallistic
+```
+
+```{r}
+# Team attack and defence strengths
+library(tidybayes)
+
+attack <- ranef(fit)$team[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team") |>
+  rename(
+    att_mean = Estimate,
+    att_lo = Q2.5,
+    att_hi = Q97.5
+  )
+
+defence <- ranef(fit)$opponent[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team") |>
+  rename(
+    def_mean_raw = Estimate,
+    def_lo_raw = Q2.5,
+    def_hi_raw = Q97.5
+  ) |>
+  mutate(
+    def_mean = -def_mean_raw,
+    def_lo   = -def_hi_raw,
+    def_hi   = -def_lo_raw
+  )
+```
+
+```{r}
+# Ranked attack plot
+
+attack |>
+  mutate(team = reorder(team, att_mean)) |>
+  ggplot(aes(att_mean, team)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = att_lo, xmax = att_hi), height = 0) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Team attack strength (log scale)",
+    x = "Attack effect (log points)",
+    y = NULL
+  )
+
+# Over the course of the past 10 years, this makes sense. Not necessarily to date.
+```
+```{r}
+# Ranked defence plot
+
+defence |>
+  mutate(team = reorder(team, def_mean)) |>
+  ggplot(aes(def_mean, team)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = def_lo, xmax = def_hi), height = 0) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Team defence strength (log scale)",
+    x = "Defence effect (log points)",
+    y = NULL
+  )
+
+# Over the course of the past 10 years, this makes sense. Not necessarily to date.
+```
+
+
+```{r}
+# Attack vs defence
+
+attack |>
+  left_join(defence, by = "team") |>
+  ggplot(aes(att_mean, def_mean, label = team)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Attack strength",
+    y = "Defensive strength",
+    title = "Team profiles: attack vs defence"
+  )
+
+# Not perfect correlation which is good
+```
+
+```{r}
+# Home advantage and roster effects
+
+fixef(fit)
+# Having a roster strength advantage is less important than home ground advantage.
+
+exp(fixef(fit)["is_home", "Estimate"])     # home multiplier
+exp(fixef(fit)["R_diff",  "Estimate"])     # per 1 SD roster edge
+
+# 7% multiplicative boost in roster differences (given teams are already accounted for), if scale is 1
+# 12% boost by home advantage.
+```
+```{r}
+model_data_random_walk <- model_data_long |> 
+  arrange(date) |> 
+  mutate(
+    time_idx = as.integer(factor(date, ordered = TRUE))
+  ) |> 
+  select(match_id, time_idx, everything(), -date)
+```
+
+
+
+```{r}
+priors_random_walk <- c(
+  prior(normal(log(20), 0.5), class = "Intercept"),
+
+  prior(normal(0.11, 0.11), class = "b", coef = "is_home"),
+
+  prior(normal(0, 0.02), class = "b", coef = "R_diff"),
+
+  prior(exponential(3), class = "sd"),
+  
+  prior(exponential(5), class = "sd", group = "team:time_idx"),
+  prior(exponential(5), class = "sd", group = "opponent:time_idx"),
+
+  
+  prior(inv_gamma(0.4, 0.3), class = "shape")  # Modern method
+)
+
+
+fit_random_walk <- brm(
+  score ~ 1 + is_home + R_diff +
+    (1 | team) +          # attack (a_team)
+    (1 | opponent) +
+    (1 | team:time_idx) + 
+    (1 | opponent:time_idx),      # opponent effect
+  data = model_data_random_walk,
+  family = negbinomial(),
+  prior = priors_random_walk,
+  chains = 4, cores = 4, iter = 4000,
+  control = list(adapt_delta = 0.95, max_treedepth = 12)
+)
+```
+
+```{r}
+summary(fit_random_walk)
+```
+
+```{r}
+plot(fit_random_walk)
+```
+
+```{r}
+# Posterior Predictive Checks
+
+pp_check(fit_random_walk)
+pp_check(fit_random_walk, type = "error_hist", ndraws = 11)
+pp_check(fit_random_walk, type = "scatter_avg", ndraws = 100)
+# Mostly moded around 15 ish
+# Big scores can happen and these are reallistic
+```
+
+```{r}
+# Team attack and defence strengths with time
+
+attack_time <- ranef(fit_random_walk)$`team:time_idx`[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team_time") |>
+  rename(
+    att_mean = Estimate,
+    att_lo = Q2.5,
+    att_hi = Q97.5
+  ) |> 
+  separate(col = team_time, into = c("team", "time"), sep = "_"
+
+defence_time <- ranef(fit_random_walk)$`opponent:time_idx`[, , "Intercept"] |>
+  as.data.frame() |>
+  tibble::rownames_to_column("team_time") |>
+  rename(
+    def_mean_raw = Estimate,
+    def_lo_raw = Q2.5,
+    def_hi_raw = Q97.5
+  ) |>
+  mutate(
+    def_mean = -def_mean_raw,
+    def_lo   = -def_hi_raw,
+    def_hi   = -def_lo_raw
+  ) |> 
+  separate(col = team_time, into = c("team", "time"), sep = "_")
+```
+
+```{r}
+attack_time |> 
+  mutate(team = as_factor(team),
+  time = as.integer(time)) |> 
+  left_join(attack |> select(team, att_mean_base = att_mean), by = "team") |> 
+  left_join(
+    model_data_long |> 
+      arrange(date) |> 
+      mutate(
+        time = as.integer(factor(date, ordered = TRUE)),
+        R_diff = 0.07278443 * R_diff
+        ) |> 
+      select(team, time, R_diff, date),
+    by = c("team", "time")) |> 
+  arrange(team, time) |> 
+  mutate(overall_att_mean = att_mean_base + att_mean) |> 
+  mutate(overall_squad_att_mean = overall_att_mean + R_diff) |> 
+  ggplot(aes(date, overall_squad_att_mean, colour = team)) +
+  geom_line() 
+```
+
+
+```{r}
+# Ranked attack plot
+
+attack |>
+  mutate(team = reorder(team, att_mean)) |>
+  ggplot(aes(att_mean, team)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = att_lo, xmax = att_hi), height = 0) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Team attack strength (log scale)",
+    x = "Attack effect (log points)",
+    y = NULL
+  )
+
+# Over the course of the past 10 years, this makes sense. Not necessarily to date.
+```
+
+```{r}
+# Home advantage and roster effects
+
+fixef(fit_random_walk)
+# Having a roster strength advantage is less important than home ground advantage.
+
+exp(fixef(fit)["is_home", "Estimate"])     # home multiplier
+exp(fixef(fit)["R_diff",  "Estimate"])     # per 1 SD roster edge
+
+# 7% multiplicative boost per STDEV in roster differences (given teams are already accounted for)
+# 12% boost by home advantage.
+```
+
+
+
+```{r}#
+# Overall attack and defensive factors
+
+player_att_def_df <- player_channels_df |> 
+  mutate(
+    att_form = case_when(
+      position == "Fullback" ~ 0.2*att_runs + 0.3*att_plays + 0.5*att_overall,
+      position == "Centre" ~ 0.3*att_runs + 0.2*att_plays + 0.5*att_overall,
+      position == "Halfback" ~ 0.2*att_runs + 0.4*att_plays + 0.4*att_overall,
+      position == "Five-Eighth" ~ 0.3*att_runs + 0.4*att_plays + 0.3*att_overall,
+      position == "Prop" ~ 0.6*att_runs + 0.2*att_plays + 0.2*att_overall,
+      position == "Hooker" ~ 0.2*att_runs + 0.5*att_plays + 0.3*att_overall,
+      position == "Second Row" ~ 0.6*att_runs + 0.2*att_plays + 0.2*att_overall,
+      position == "Lock" ~ 0.5*att_runs + 0.3*att_plays + 0.2*att_overall,
+      position == "Interchange" ~ 0.5*att_runs + 0.3*att_plays + 0.2*att_overall
+    ),
+    def_form = case_when(
+      position == "Fullback" ~ 0.4*def_work - 0.6*def_disc,
+      position == "Centre" ~ 0.4*def_work - 0.6*def_disc,
+      position == "Halfback" ~ 0.5*def_work - 0.5*def_disc,
+      position == "Five-Eighth" ~ 0.5*def_work - 0.5*def_disc,
+      position == "Prop" ~ 0.6*def_work - 0.4*def_disc,
+      position == "Hooker" ~ 0.6*def_work - 0.4*def_disc,
+      position == "Second-Rower" ~ 0.6*def_work - 0.4*def_disc,
+      position == "Lock" ~ 0.6*def_work - 0.4*def_disc,
+      position == "Interchange" ~ 0.5*def_work - 0.5*def_disc,
+    ),
+  ) |> 
+  select(-(att_runs:def_disc)) |> 
+  group_by(competition_id, round, position) |> 
+  mutate(across(
+    att_form:def_form,
+    .fns = ~scale(.x)
+  )) |> 
+  ungroup() |> 
+  mutate(att_form = ifelse(is.na(att_form), 0, att_form),
+         def_form = ifelse(is.na(def_form), 0, def_form))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

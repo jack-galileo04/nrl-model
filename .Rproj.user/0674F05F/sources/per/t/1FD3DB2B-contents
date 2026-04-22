@@ -1,0 +1,26 @@
+---
+title: "nrl_analysis-betting-v2"
+output: html_document
+date: "2025-02-03"
+---
+
+```{r}
+library(rvest)
+library(tidyverse)
+
+url <- "https://afltables.com/rl/seas/2024.html"
+
+webpage <- read_html(url)
+```
+
+```{r}
+data <- webpage |> 
+  html_nodes(css = "table") |> 
+  html_table()
+length(data)
+```
+```{r}
+data[[3]]
+```
+
+

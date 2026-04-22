@@ -1,0 +1,58 @@
+---
+title: "nrl_ausbet_features"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(here)
+
+library(readxl)
+data_raw <- read_xlsx(here("Data/Raw/nrl.xlsx"), col_names = TRUE, skip = 1)
+```
+
+```{r Cleaning Pipeline}
+data_clean <- data_raw |> 
+  janitor::clean_names() |> 
+  mutate(date = as_date(date),
+         time = as.numeric(format(kick_off_local, "%H")), kick_off_local = NULL,
+         home_team = factor(home_team),
+         away_team = factor(away_team), 
+         venue = factor(venue),
+         play_off = ifelse(play_off_game == "Y", 1, 0), play_off_game = NULL,
+         over_time = ifelse(over_time == "Y", 1, 0),
+         result = case_when(
+           home_score > away_score ~ "H",
+           away_score > home_score ~ "A",
+           T ~ "D"),
+         home_team = fedmatch::clean_strings(home_team),
+         away_team = fedmatch::clean_strings(away_team)) |> 
+  arrange(date) |> 
+  mutate(match_id = row_number())
+
+write.csv(data_clean, here("Data/Processed/matches_clean.csv"), row.names = FALSE)
+```
+
+```{r}
+knitr::purl(here("Scripts/cleaning.Rmd"), output = here("Scripts/01_cleaning_script.R"), documentation = 0)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
