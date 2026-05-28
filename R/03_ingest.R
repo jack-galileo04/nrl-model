@@ -1,0 +1,160 @@
+#################### fetching previous round results #################### 
+
+fetch_PreviousRound_ladder_raw <- function(params) {
+  
+  nrlR::fetch_ladder_nrl(
+    season = params$season, 
+    round_number = params$round_number-1
+  )
+  
+}
+
+fetch_PreviousRound_player_raw <- function(params) {
+  
+  nrlR::fetch_player_stats(
+    season = params$season, 
+    round = params$round_number-1,
+    league = "nrl", 
+    source = "championdata", 
+    comp = params$comp
+  )
+  
+}
+
+fetch_PreviousRound_team_raw <- function(params) {
+  
+  nrlR::fetch_team_stats_championdata(
+    round = params$round_number-1,
+    comp = params$comp
+  )
+  
+}
+
+#################### fetching upcoming odds #################### 
+
+get_nrl_odds <- function(api_key) {
+  
+  sports_resp <- GET(
+    "https://api.the-odds-api.com/v4/sports/",
+    query = list(apiKey = api_key)
+  )
+  
+  stop_for_status(sports_resp)
+  
+  sports <- fromJSON(content(sports_resp, "text", encoding = "UTF-8"))
+  
+  nrl_sport_df <- sports |> 
+    filter(grepl("NRL|Rugby League", title, ignore.case = TRUE) | grepl("rugbyleague", key, ignore.case = TRUE))
+  
+  if(nrl_sport_df[1,]$active == FALSE){
+    stop("NRL is not active: The active column contains FALSE")
+  }
+  
+  odds_resp <- GET(
+    "https://api.the-odds-api.com/v4/sports/rugbyleague_nrl/odds/",
+    query = list(
+      apiKey = api_key,
+      regions = "au",
+      markets = "h2h",
+      oddsFormat = "decimal",
+      dateFormat = "iso"
+    )
+  )
+  status_code(odds_resp)
+  content(odds_resp, "text", encoding = "UTF-8")
+  stop_for_status(odds_resp)
+  
+  odds_json <- fromJSON(content(odds_resp, "text", encoding = "UTF-8"), flatten = TRUE)
+  
+  headers(odds_resp)[c("x-requests-remaining","x-requests-used","x-requests-last")]
+  
+  odds_df <- odds_json |> 
+    select(commence_time, home_team, away_team, bookmakers) |> 
+    unnest(bookmakers) |> 
+    rename(bookmaker_key = key, bookmaker_last_update = last_update) |>
+    unnest(markets) |> 
+    unnest(outcomes) |> 
+    transmute(
+      commence_time,
+      home_team,
+      away_team,
+      bookmaker = bookmaker_key,
+      market = key, 
+      outcome = name,
+      odds = price,
+      last_update
+    ) |> 
+    filter(market == "h2h") |> 
+    mutate(outcome = case_when(
+      outcome == home_team ~ "home_team_odds",
+      outcome == away_team ~ "away_team_odds",
+      T ~ NA
+    )) |> 
+    pivot_wider(
+      names_from = outcome, values_from = odds
+    ) |> 
+    mutate(commence_time = as_datetime(commence_time),
+           last_update = as_datetime(last_update))
+  
+  return(odds_df)
+}
+
+# Function that caches, limits, and keeps fetch robust
+odds_API_fetch <- function() {
+  
+  api_key <- Sys.getenv("API_KEY")
+  
+  odds_api <- get_nrl_odds(api_key)
+  
+  odds_api |> 
+    mutate(home_team = str_extract(home_team, "\\w+$"),
+           away_team = str_extract(away_team, "\\w+$"),
+           date = as_datetime(commence_time))
+}
+
+#################### fetching upcoming round data #################### 
+
+# lineup url for scraping
+build_lineup_url <- function(params) {
+  
+  tuesday <- gsub("-", "/", floor_date(Sys.Date(), "week", week_start = params$week_start))
+  
+  if (params$special_round != ""){
+    paste0("https://www.nrl.com/news/", tuesday, "/", params$special_round, "/")
+  } else {
+    paste0("https://www.nrl.com/news/", tuesday, "/nrl-team-lists-round-", params$round, "/")
+  }
+}
+
+fetch_UpcomingRound_ladder_raw <- function(params) {
+  
+  fetch_ladder_nrl(
+    season = params$season, 
+    round_number = params$round_number
+  )
+  
+}
+
+fetch_UpcomingRound_lineups_raw <- function(params) {
+  
+  lineup_url <- build_lineup_url(params)
+  
+  nrlR::fetch_lineups(
+    url = lineup_url, 
+    source = "nrl.com", 
+    type = "team_list"
+  )
+  
+}
+
+fetch_UpcomingRound_fixtures_raw <- function(params) {
+  
+  nrlR::fetch_results(
+    seasons = params$season,
+    league = "nrl", 
+    source = "rugbyleagueproject"
+  ) |> 
+    filter(round == params$round_number + 1) # fetching only upcoming round
+  
+}
+

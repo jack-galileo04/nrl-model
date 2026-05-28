@@ -1,0 +1,582 @@
+---
+title: "modelling_nrlR"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(vip)
+
+library(lubridate)
+library(here)
+library(readxl)
+
+library(rsample)
+```
+
+```{r}
+nrl_odds <- read_excel(here("Data/Raw/nrl.xlsx"), skip = 1) |> 
+  janitor::clean_names() |> 
+  arrange(date) |> 
+  select(date, home_team, away_team, 
+         home_odds, away_odds, 
+         home_odds_open, home_odds_close, away_odds_open, away_odds_close,
+         home_line_open, home_line_close, away_line_open, away_line_close,
+         home_line_odds_open, home_line_odds_close, away_line_odds_open, away_line_odds_close) |> 
+  mutate(home_team_short = str_extract(home_team, "\\S+$"),
+         away_team_short = str_extract(away_team, "\\S+$")) |> 
+  select(-home_team, -away_team)
+```
+
+```{r}
+model_data <- read_csv(here("Data/02_Features/feature_engineered_df.csv"))
+```
+
+
+```{r Data Split}
+cutoff <- as.Date("2025-02-01")
+
+train_data <- model_data |>  filter(date < cutoff)
+test_data  <- model_data |>  filter(date >= cutoff)
+
+N <- nrow(train_data)
+number_folds <- 10
+assess <- 150
+skip <- 30
+initial <- -(number_folds*skip+assess-N)
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+
+metrics <- yardstick::metric_set(mn_log_loss, accuracy, roc_auc)
+```
+
+```{r Model Recipes}
+
+xgb_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(home_result, away_result,
+          home_team, away_team,
+          date, round) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors())
+```
+
+```{r Spec}
+xgb_spec <- boost_tree(
+  trees = 1000,
+  tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
+  sample_size = tune(), mtry = tune(),
+  learn_rate = tune()
+) |> 
+  set_engine("xgboost",
+             params = list(
+               nthread = 4,
+               objective = "binary:logistic",
+               eval_metric = "logloss"
+             )) |> 
+  set_mode("classification")
+```
+
+```{r Workflow}
+xgb_wf <- workflow() |> 
+  add_model(xgb_spec) |> 
+  add_recipe(xgb_rec)
+
+params <- xgb_wf |> 
+  extract_parameter_set_dials() |> 
+  finalize(train_data)
+
+grid <- grid_space_filling(
+  params,
+  size = 20
+)
+```
+
+```{r xgb Tune}
+set.seed(123)
+
+xgb_tune_res <- tune_grid(
+  xgb_wf,
+  resamples = folds,
+  grid = grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  metrics = metrics
+)
+```
+
+```{r}
+odds_comparison_df <- xgb_tune_res |> 
+  collect_predictions() |> 
+  bind_cols(
+    do.call(rbind, lapply(folds$splits,assessment)) |> 
+      slice(rep(row_number(), times = 20))
+  ) |> 
+  mutate(home_team_short = str_extract(home_team, "\\S+$"),
+         away_team_short = str_extract(away_team, "\\S+$")) |> 
+  left_join(nrl_odds, 
+            by = c("date", "home_team_short", "away_team_short")
+            ) |> 
+  select(1:12, match_id, date, home_team, away_team, home_result, away_result, 59:72)
+  
+```
+
+
+```{r}
+xgb_best_logloss <- xgb_tune_res |> select_best(metric = "mn_log_loss")
+xgb_logloss <- (xgb_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+saveRDS(xgb_tune_res, here("Outputs/xgb_tune_res.rds"))
+saveRDS(xgb_best_logloss, here("Outputs/model_parameters.rds"))
+
+final_wf <- finalize_workflow(xgb_wf, xgb_best_logloss)
+final_fit <- fit(final_wf, data = train_data)
+
+predict(final_fit, new_data = test_data, type = "prob") |> 
+    bind_cols(test_data) |> 
+    select(match_id, date, home_team, away_team, .pred_H, .pred_A) |> 
+    mutate(pred = ifelse(.pred_H > .pred_A, home_team, away_team))
+
+saveRDS(final_wf, here("Outputs/modelling_pipeline_workflow.rds"))
+```
+
+```{r}
+xgb_tune_res |> collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  pivot_longer(
+    cols = mtry:sample_size,
+    values_to = "value",
+    names_to = "parameter"
+  ) |> 
+  ggplot(aes(value, mean)) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), colour = "red", linewidth = 1.5) +
+  geom_point(size = 2) +
+  facet_wrap(~parameter, scales = "free_x")
+
+# No real pattern here
+# Lower learn rates are better, all else seem relatively constant
+```
+```{r}
+vip(final_fit, n = 15)
+# team based stats like field position, elo, ladder are most important
+# probably try to combine player stats into aggregated features
+```
+
+
+
+```{r}
+set.seed(456)
+
+calibration_data <- train_data |> 
+  arrange(date) |> 
+  slice_tail(n = round(0.2 * nrow(train_data))) |> 
+  mutate(home_team_short = str_extract(home_team, "\\S+$"),
+         away_team_short = str_extract(away_team, "\\S+$")) |> 
+  left_join(nrl_odds, by = c("date", "home_team_short", "away_team_short")) |> 
+  select(-home_team_short, away_team_short) |> 
+  mutate(date = as_date(date))
+
+xgb_train_data <- train_data |> 
+  arrange(date) |> 
+  slice_head(n = round(0.8 * nrow(train_data))) |> 
+  mutate(home_team_short = str_extract(home_team, "\\S+$"),
+         away_team_short = str_extract(away_team, "\\S+$")) |> 
+  left_join(nrl_odds, by = c("date", "home_team_short", "away_team_short")) |> 
+  select(-home_team_short, away_team_short) |> 
+  mutate(date = as_date(date))
+
+test_data <- test_data |> 
+  mutate(home_team_short = str_extract(home_team, "\\S+$"),
+         away_team_short = str_extract(away_team, "\\S+$")) |> 
+  left_join(nrl_odds, by = c("date", "home_team_short", "away_team_short")) |> 
+  select(-home_team_short, away_team_short) |> 
+  mutate(date = as_date(date))
+
+final_wf <- finalize_workflow(xgb_wf, xgb_best_logloss)
+final_fit <- fit(final_wf, data = xgb_train_data)
+
+saveRDS(final_wf, here("Outputs/modelling_pipeline_workflow.rds"))
+```
+
+```{r}
+xgb_validation_preds <- predict(final_fit, new_data = calibration_data, type = "prob") |> 
+  bind_cols(calibration_data) |> 
+  mutate(result = ifelse(result == "H", 1, 0),
+         logit_xgb_p = log(.pred_H/(1-.pred_H)),
+         home_mrket_implied_p = 1/home_odds,
+         away_mrket_implied_p = 1/away_odds,
+         devigged_home_p = home_mrket_implied_p / (home_mrket_implied_p + away_mrket_implied_p),
+         logit_mrket_p = log(devigged_home_p / (1-devigged_home_p) )
+  )
+
+xgb_test_preds <- predict(final_fit, new_data = test_data, type = "prob") |> 
+  bind_cols(test_data) |> 
+  mutate(result = ifelse(result == "H", 1, 0),
+         logit_xgb_p = log(.pred_H/(1-.pred_H)),
+         home_mrket_implied_p = 1/home_odds,
+         away_mrket_implied_p = 1/away_odds,
+         devigged_home_p = home_mrket_implied_p / (home_mrket_implied_p + away_mrket_implied_p),
+         logit_mrket_p = log(devigged_home_p / (1-devigged_home_p) )
+         )
+```
+
+```{r}
+set.seed(567)
+
+calibration_validation_model <- glm(
+  result ~ logit_xgb_p,
+  data = xgb_validation_preds,
+  family = binomial()
+)
+
+calibration_validation_preds <- predict(
+  calibration_validation_model,
+  newdata = xgb_validation_preds,
+  type = "response"
+)
+
+hybrid_validation_model <- glm(
+  result ~ logit_xgb_p + logit_mrket_p,
+  data = xgb_validation_preds,
+  family = binomial()
+)
+
+hybrid_validation_preds <- predict(
+  hybrid_validation_model,
+  newdata = xgb_validation_preds,
+  type = "response"
+)
+
+xgb_validation_preds$cal_home_pred <- calibration_validation_preds
+xgb_validation_preds$hybrid_home_pred <- hybrid_validation_preds
+```
+
+```{r}
+summary(calibration_validation_model)
+# Uses intercept as base and scales based on xgb
+
+summary(hybrid_validation_model)
+# Uses below 0.5 base, scales mainly with market p, scales down with logit.
+```
+
+
+```{r}
+xgb_validation_preds |> 
+  select(cal_home_pred, everything()) |> 
+  summarise(
+    xgb_logloss = -mean( result * log(.pred_H) + (1-result) * log(.pred_A)),
+    cal_logloss = -mean(result * log(cal_home_pred) + (1-result) * log(1-cal_home_pred)),
+    hybrid_logloss = -mean(result * log(hybrid_home_pred) + (1-result) * log(1-hybrid_home_pred))
+  )
+
+# hybrid > calibrated > xgb logloss on the trained data
+```
+
+```{r}
+calibration_test_preds <- predict(
+  calibration_validation_model,
+  newdata = xgb_test_preds,
+  type = "response"
+)
+
+hybrid_test_preds <- predict(
+  hybrid_validation_model,
+  newdata = xgb_test_preds,
+  type = "response"
+)
+
+xgb_test_preds$cal_home_pred <- calibration_test_preds
+xgb_test_preds$hybrid_home_pred <- hybrid_test_preds
+
+xgb_test_preds |> 
+  select(cal_home_pred, everything()) |> 
+  summarise(
+    xgb_logloss = -mean( result * log(.pred_H) + (1-result) * log(.pred_A)),
+    cal_logloss = -mean(result * log(cal_home_pred) + (1-result) * log(1-cal_home_pred)),
+    hybrid_logloss = -mean(result * log(hybrid_home_pred) + (1-result) * log(1-hybrid_home_pred), na.rm = TRUE)
+  )
+
+# hybrid > calibrated > xgb logloss on out of sample data
+```
+
+```{r}
+reliability_curve_df <- bind_rows(
+  xgb_validation_preds,
+  xgb_test_preds
+) |> 
+  rename(xgb_home_pred = .pred_H) |> 
+  mutate(
+    xgb_pred_bins = case_when(
+      xgb_home_pred <= 0.1 ~ 0.1,
+      xgb_home_pred <= 0.2 & xgb_home_pred > 0.1 ~ 0.2,
+      xgb_home_pred <= 0.3 & xgb_home_pred > 0.2 ~ 0.3,
+      xgb_home_pred <= 0.4 & xgb_home_pred > 0.3 ~ 0.4,
+      xgb_home_pred <= 0.5 & xgb_home_pred > 0.4 ~ 0.5,
+      xgb_home_pred <= 0.6 & xgb_home_pred > 0.5 ~ 0.6,
+      xgb_home_pred <= 0.7 & xgb_home_pred > 0.6 ~ 0.7,
+      xgb_home_pred <= 0.8 & xgb_home_pred > 0.7 ~ 0.8,
+      xgb_home_pred <= 0.9 & xgb_home_pred > 0.8 ~ 0.9,
+      xgb_home_pred <= 1 & xgb_home_pred > 0.9 ~ 1,
+    )
+  ) |> 
+  group_by(xgb_pred_bins) |> 
+  mutate(xgb_home_win_prop = sum(result) / n()) |> 
+  ungroup() |> 
+  mutate(
+    cal_pred_bins = case_when(
+      cal_home_pred <= 0.1 ~ 0.1,
+      cal_home_pred <= 0.2 & cal_home_pred > 0.1 ~ 0.2,
+      cal_home_pred <= 0.3 & cal_home_pred > 0.2 ~ 0.3,
+      cal_home_pred <= 0.4 & cal_home_pred > 0.3 ~ 0.4,
+      cal_home_pred <= 0.5 & cal_home_pred > 0.4 ~ 0.5,
+      cal_home_pred <= 0.6 & cal_home_pred > 0.5 ~ 0.6,
+      cal_home_pred <= 0.7 & cal_home_pred > 0.6 ~ 0.7,
+      cal_home_pred <= 0.8 & cal_home_pred > 0.7 ~ 0.8,
+      cal_home_pred <= 0.9 & cal_home_pred > 0.8 ~ 0.9,
+      cal_home_pred <= 1 & cal_home_pred > 0.9 ~ 1,
+    )
+  ) |> 
+  group_by(cal_pred_bins) |> 
+  mutate(cal_home_win_prop = sum(result) / n()) |> 
+  ungroup() |> 
+  mutate(
+    hybrid_pred_bins = case_when(
+      hybrid_home_pred <= 0.1 ~ 0.1,
+      hybrid_home_pred <= 0.2 & hybrid_home_pred > 0.1 ~ 0.2,
+      hybrid_home_pred <= 0.3 & hybrid_home_pred > 0.2 ~ 0.3,
+      hybrid_home_pred <= 0.4 & hybrid_home_pred > 0.3 ~ 0.4,
+      hybrid_home_pred <= 0.5 & hybrid_home_pred > 0.4 ~ 0.5,
+      hybrid_home_pred <= 0.6 & hybrid_home_pred > 0.5 ~ 0.6,
+      hybrid_home_pred <= 0.7 & hybrid_home_pred > 0.6 ~ 0.7,
+      hybrid_home_pred <= 0.8 & hybrid_home_pred > 0.7 ~ 0.8,
+      hybrid_home_pred <= 0.9 & hybrid_home_pred > 0.8 ~ 0.9,
+      hybrid_home_pred <= 1 & hybrid_home_pred > 0.9 ~ 1,
+    )
+  ) |> 
+  group_by(hybrid_pred_bins) |> 
+  mutate(hybrid_home_win_prop = sum(result) / n())
+
+reliability_curve_df |> 
+  filter(is.na(hybrid_home_pred))
+```
+
+```{r}
+reliability_curve_df |> 
+  group_by(xgb_pred_bins) |> 
+  summarise(
+    home_prop = first(xgb_home_win_prop)
+  ) |> 
+  ggplot(aes(xgb_pred_bins)) +
+  geom_line(aes(y = home_prop, colour = "Proportion of Home Wins")) +
+  geom_abline(slope = 1) +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  labs(
+    title = "XgBoost Model Reliability Curve",
+    x = "Model Prediction",
+    y = "Proportion of Home Wins"
+  )
+
+reliability_curve_df |> 
+  group_by(cal_pred_bins) |> 
+  summarise(
+    home_prop = first(cal_home_win_prop)
+  ) |> 
+  ggplot(aes(cal_pred_bins)) +
+  geom_line(aes(y = home_prop, colour = "Proportion of Home Wins")) +
+  geom_abline(slope = 1) +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  labs(
+    title = "Calibrated XgBoost Model Reliability Curve",
+    x = "Model Prediction",
+    y = "Proportion of Home Wins"
+  )
+
+reliability_curve_df |> 
+  group_by(hybrid_pred_bins) |> 
+  summarise(
+    home_prop = first(hybrid_home_win_prop)
+  ) |> 
+  ggplot(aes(hybrid_pred_bins)) +
+  geom_line(aes(y = home_prop, colour = "Proportion of Home Wins")) +
+  geom_abline(slope = 1) +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  labs(
+    title = "Hybrid XgBoost Model Reliability Curve",
+    x = "Model Prediction",
+    y = "Proportion of Home Wins"
+  )
+
+# Hybrid is definitely best calibrated, the large drop down at 100% bin may be attributed to a small sample size, and rare occurence
+```
+
+```{r}
+calibration_model <- hybrid_validation_model
+
+saveRDS(calibration_model, here("Outputs/probability_calibration_model.rds"))
+```
+
+
+```{r}
+xgb_test_preds |> 
+  select(.pred_H, cal_home_pred, hybrid_home_pred)
+```
+
+
+Bayesian:
+
+```{r}
+p_oof <- xgb_tune_res |> collect_predictions() |> 
+  inner_join(xgb_best_logloss) |> 
+  bind_cols(
+    do.call(rbind, lapply(folds$splits,assessment))
+  ) |> 
+  select(.pred_class, .pred_A, .pred_H, id, result = result...5, date, match_id, home_result, away_result, home_team, away_team, )
+```
+
+```{r}
+# Fitting simple Bayesian Logistic Regression model to out of fold estimates
+library(brms)
+
+p_oof$logit_p_ml <- log(p_oof$.pred_H/(1-p_oof$.pred_H))
+p_oof$logit_p_ml <- qlogis(pmin(pmax(p_oof$logit_p_ml, 1e-6), 1 - 1e-6))
+
+# Un-informative priors
+
+priors_cal <- c(
+  set_prior("normal(0, 2)", class = "Intercept"), # intercept
+  set_prior("normal(0, 2)", class = "b")   # slopes
+)
+
+fit_cal <- brm(
+  result ~ 1 + logit_p_ml,
+  data   = p_oof,
+  family = bernoulli(),
+  prior  = priors_cal,
+  chains = 4, iter = 2000, cores = 4
+)
+
+priors_team <- c(
+  set_prior("normal(0, 2)", class = "Intercept"), # intercept
+  set_prior("normal(0, 2)", class = "b"),   # slopes
+  set_prior("exponential(1)", class = "sd")
+)
+
+fit_team <- brm(
+  result ~ 1 + logit_p_ml + (1 | home_team) + (1 | away_team),
+  data   = p_oof,
+  family = bernoulli(),
+  prior  = priors_team,
+  chains = 4, iter = 2000, cores = 4
+)
+
+# Include team partial pooling (1 | home_team) + (1 | away_team) set_prior("exponential(1)", class = "sd")
+```
+
+```{r}
+first_k_res <- kfold(fit_cal, k = 10)
+team_k_res <- kfold(fit_team, k = 10)
+
+first_k_res
+team_k_res
+
+# team has a stronger elpd_kfold by roughly 60, and stronger kfoldic by roughly 120, with 33 vs 1.4 complexity.
+```
+
+```{r}
+summary(fit_cal)
+summary(fit_team)
+summary(p_oof$logit_p_ml)
+sd(p_oof$logit_p_ml)
+summary(p_oof$.pred_H)
+```
+
+```{r}
+set.seed(234)
+
+final_wf <- finalize_workflow(xgb_wf, xgb_best_logloss)
+final_fit <- fit(final_wf, data = train_data)
+ml_preds <- predict(final_fit, new_data = test_data, type = "prob") |> 
+  bind_cols(test_data) |> 
+  mutate(
+    result = case_when(
+      result == "H" ~ 1,
+      result == "A" ~ 0,
+      T ~ 0
+    )
+  )
+
+ml_preds$logit_p_ml <- log(ml_preds$.pred_H/(1-ml_preds$.pred_H))
+ml_preds$logit_p_ml <- qlogis(pmin(pmax(ml_preds$logit_p_ml, 1e-6), 1 - 1e-6))
+```
+
+```{r}
+# Logloss ml
+
+ml_preds |> 
+  summarise(
+    logloss = -1/n()*sum(result*log(.pred_H) + (1-result)*log(.pred_A))
+  )
+```
+
+```{r}
+vip(final_fit, num_features = 20L)
+# Lagged scores, and lagged possessions.
+```
+
+```{r}
+ep_first <- posterior_epred(
+  fit_cal,
+  newdata = ml_preds,
+  re_formula = NULL
+)
+ep_team <- posterior_epred(
+  fit_team,
+  newdata = ml_preds,
+  re_formula = NULL
+)
+phat_first <- colMeans(ep_first)
+phat_team <- colMeans(ep_team)
+
+logloss_first <- -mean(
+  ml_preds$result * log(phat_first) +
+    (1 - ml_preds$result) * log(1 - phat_first)
+)
+logloss_team <- -mean(
+  ml_preds$result * log(phat_team) +
+    (1 - ml_preds$result) * log(1 - phat_team)
+)
+```
+
+So far, Bayesian did not improve ML model.
+
+Calibration:
+
+
+```{r}
+knitr::purl("modelling_nrlR.Rmd", output = "modelling_nrlR.R")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

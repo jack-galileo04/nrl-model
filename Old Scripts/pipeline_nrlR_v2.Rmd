@@ -1,0 +1,985 @@
+---
+title: 
+output: html_document
+date: "2026-05-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(nrlR)
+library(elo)
+library(fuzzyjoin)
+library(tidyverse)
+library(tidymodels)
+library(here)
+library(DBI)
+library(odbc)
+library(httr)
+library(jsonlite)
+library(validate)
+library(janitor)
+
+read_params <- function(){
+  
+  list(
+    season = 2026,
+    round_number = 13,
+    week_start = 2,
+    
+    lambda = 0.94, # Degree of recency bias in rolling form variables
+    elo_k = 23, # Degree of recency bias in elo model
+    
+    special_round = "", # "nrl-team-lists-magic-round"
+    
+    position_minutes_weights = tribble(
+      ~position, ~w,
+      "Fullback", 1,
+      "Wing", 1,
+      "Centre", 1,
+      "Five-Eighth", 1,
+      "Halfback", 1,
+      "Prop", 0.6,
+      "Hooker", 0.8,
+      "Second Row", 0.75,
+      "Lock", 0.75,
+      "Interchange", 0.4
+    ), # weighting stats by minutes played (approximate)
+    
+    comp = 12999
+  )
+}
+
+params <- read_params()
+
+#fetch_cd_comps() |> 
+#  filter(str_detect(name, "NRL Finals") | str_detect(name, "NRL Premiership")) |> 
+#  slice_tail(n = -4)
+
+# lineup url for scraping
+build_lineup_url <- function(params) {
+  
+  tuesday <- gsub("-", "/", floor_date(Sys.Date(), "week", week_start = params$week_start))
+  
+  if (params$special_round != ""){
+    paste0("https://www.nrl.com/news/", tuesday, "/", params$special_round, "/")
+  } else {
+    paste0("https://www.nrl.com/news/", tuesday, "/nrl-team-lists-round-", params$round, "/")
+  }
+}
+
+# upcoming lineups
+fetch_upcoming_lineups <- function(lineup_url) {
+
+  current_hour <- as.integer(format(Sys.time(), "%H"))
+  
+  if (current_hour < 16){
+    message("Before 4pm → skipping lineup fetch") # lineups typically get published 4pm AEST
+    return(NULL)
+  }
+    
+    nrlR::fetch_lineups(
+      url = lineup_url,
+      source = "nrl.com",
+      type = "team_list"
+    )
+
+}
+```
+
+# Data Ingestion
+
+## Load Historical Data
+
+```{r}
+historical_ladder <- read_csv(here("Data/01_Raw/Ladder Data.csv"))
+historical_player <- read_csv(here("Data/01_Raw/Player Data.csv"))
+historical_team <- read_csv(here("Data/01_Raw/Team Data.csv"))
+player_key <- read_csv(here("Data/01_Raw/Player Key.csv"))
+```
+
+
+## Fetch Previous Round Data
+
+```{r}
+raw_PreviousRound_ladder <- nrlR::fetch_ladder_nrl(
+  season = params$season, 
+  round_number = params$round_number-1
+  )
+
+raw_PreviousRound_player <- nrlR::fetch_player_stats(
+  season = params$season, 
+  round = params$round_number-1,
+  league = "nrl", 
+  source = "championdata", 
+  comp = params$comp
+  )
+
+raw_PreviousRound_team <- nrlR::fetch_team_stats_championdata(
+  round = params$round_number-1,
+  comp = params$comp
+  )
+```
+
+
+## Fetch Odds
+
+```{r}
+get_nrl_odds <- function(api_key) {
+  
+  sports_resp <- GET(
+    "https://api.the-odds-api.com/v4/sports/",
+    query = list(apiKey = api_key)
+  )
+  
+  stop_for_status(sports_resp)
+  
+  sports <- fromJSON(content(sports_resp, "text", encoding = "UTF-8"))
+  
+  nrl_sport_df <- sports |> 
+    filter(grepl("NRL|Rugby League", title, ignore.case = TRUE) | grepl("rugbyleague", key, ignore.case = TRUE))
+  
+  if(nrl_sport_df[1,]$active == FALSE){
+    stop("NRL is not active: The active column contains FALSE")
+  }
+  
+  odds_resp <- GET(
+    "https://api.the-odds-api.com/v4/sports/rugbyleague_nrl/odds/",
+    query = list(
+      apiKey = api_key,
+      regions = "au",
+      markets = "h2h",
+      oddsFormat = "decimal",
+      dateFormat = "iso"
+    )
+  )
+  status_code(odds_resp)
+  content(odds_resp, "text", encoding = "UTF-8")
+  stop_for_status(odds_resp)
+  
+  odds_json <- fromJSON(content(odds_resp, "text", encoding = "UTF-8"), flatten = TRUE)
+  
+  headers(odds_resp)[c("x-requests-remaining","x-requests-used","x-requests-last")]
+  
+  odds_df <- odds_json |> 
+    select(commence_time, home_team, away_team, bookmakers) |> 
+    unnest(bookmakers) |> 
+    rename(bookmaker_key = key, bookmaker_last_update = last_update) |>
+    unnest(markets) |> 
+    unnest(outcomes) |> 
+    transmute(
+      commence_time,
+      home_team,
+      away_team,
+      bookmaker = bookmaker_key,
+      market = key, 
+      outcome = name,
+      odds = price,
+      last_update
+    ) |> 
+    filter(market == "h2h") |> 
+    mutate(outcome = case_when(
+      outcome == home_team ~ "home_team_odds",
+      outcome == away_team ~ "away_team_odds",
+      T ~ NA
+    )) |> 
+    pivot_wider(
+      names_from = outcome, values_from = odds
+    ) |> 
+    mutate(commence_time = as_datetime(commence_time),
+           last_update = as_datetime(last_update))
+  
+  return(odds_df)
+}
+
+# Function that caches, limits, and keeps fetch robust
+odds_API_fetch <- function() {
+  
+  api_key <- readRDS(here("Config/api_key.rds")) # fix later
+  
+  odds_api <- get_nrl_odds(api_key)
+        
+  odds_api |> 
+    mutate(home_team = str_extract(home_team, "\\w+$"),
+           away_team = str_extract(away_team, "\\w+$"),
+           date = as.POSIXct(commence_time))
+}
+```
+
+```{r}
+odds_api <- get_nrl_odds(api_key)
+    
+odds_raw <- odds_api |> 
+      mutate(home_team = str_extract(home_team, "\\w+$"),
+             away_team = str_extract(away_team, "\\w+$"))
+```
+
+# Cleaning
+## Clean Previous Round Data
+
+```{r}
+clean_PreviousRound_ladder <- raw_PreviousRound_ladder |> 
+  janitor::clean_names() |> # cleans names if format changes
+  rename(ladder_points = points) |> # clearer name
+  arrange(
+    desc(ladder_points), 
+    desc(points_diff), 
+    desc(points_for)
+  ) |> # nrl ladder order
+  mutate(
+    season = params$season,
+    round = params$round_number - 1,
+    ladder_position = row_number(), # after arrangin in ladder order, row_number is the position
+    team = case_when(
+      team == "Wests Tigers" ~ "Tigers",
+      team == "Sea Eagles" ~ "Eagles",
+      T ~ team)
+    ) |> 
+  select(colnames(historical_ladder)) # select columns from historical data
+
+clean_PreviousRound_player <- raw_PreviousRound_player |> 
+  mutate(
+    season = params$season,
+    utc_start = as_datetime(utc_start)
+    ) |> 
+  janitor::clean_names() |>  # cleans names if format changes
+  select(colnames(historical_player)) # select columns from historical data
+
+clean_PreviousRound_team <- raw_PreviousRound_team |> 
+  mutate(
+    season = params$season,
+    utc_start = as_datetime(utc_start)
+    ) |> 
+  janitor::clean_names() |>
+  select(colnames(historical_team))
+```
+
+
+# Update
+## Update Historical Data
+
+```{r}
+updated_historical_ladder <- bind_rows(
+  historical_ladder,
+  clean_PreviousRound_ladder
+  ) |> 
+  group_by(team, season, round) |> 
+  slice_tail(n = 1) |> 
+  ungroup() # removing duplicates
+
+updated_historical_player <- bind_rows(
+  historical_player,
+  clean_PreviousRound_player
+  ) |> 
+  group_by(player_id, match_id) |> 
+  slice_tail(n = 1) |> 
+  ungroup() # removing duplicates
+
+updated_historical_team <- bind_rows(
+  historical_team,
+  clean_PreviousRound_team
+  ) |> 
+  group_by(team_name, match_id) |> 
+  slice_tail(n = 1) |> 
+  ungroup() # removing duplicates
+
+write_csv(updated_historical_ladder, here("Data/01_Raw/Ladder Data.csv"))
+write_csv(updated_historical_player, here("Data/01_Raw/Player Data.csv"))
+write_csv(updated_historical_team, here("Data/01_Raw/Team Data.csv"))
+```
+
+
+# Upcoming Data
+## Fetch Raw Upcoming Data
+
+```{r}
+raw_UpcomingRound_fixtures <- nrlR::fetch_results(
+  seasons = params$season,
+  league = "nrl", 
+  source = "rugbyleagueproject"
+  ) |> 
+  filter(round == params$round_number + 1) # fetching only upcoming round
+
+lineup_url <- build_lineup_url(params)
+
+raw_UpcomingRound_lineups <- nrlR::fetch_lineups(
+  url = lineup_url, 
+  source = "nrl.com", 
+  type = "team_list"
+  )
+
+raw_UpcomingRound_ladder <- fetch_ladder_nrl(
+  season = params$season, 
+  round_number = params$round_number
+  )
+```
+
+
+## Clean Upcoming Data
+
+```{r}
+map_city_to_team_name <- function(team_name) {
+  case_when(
+          team_name == "Brisbane" ~ "Brisbane Broncos",
+          team_name == "Newcastle" ~ "Newcastle Knights",
+          team_name == "Melbourne" ~ "Melbourne Storm",
+          team_name == "Cronulla" ~ "Cronulla-Sutherland Sharks",
+          team_name == "Manly" ~ "Manly-Warringah Sea Eagles",
+          team_name == "North Qld" ~ "North Queensland Cowboys",
+          team_name == "South Sydney" ~ "South Sydney Rabbitohs",
+          team_name == "Sydney" ~ "Sydney Roosters",
+          team_name == "Penrith" ~ "Penrith Panthers",
+          team_name == "Parramatta" ~ "Parramatta Eels",
+          team_name == "St Geo Illa" ~ "St George-Illawarra Dragons",
+          team_name == "Gold Coast" ~ "Gold Coast Titans",
+          team_name == "Canberra" ~ "Canberra Raiders",
+          team_name == "Canterbury" ~ "Canterbury-Bankstown Bulldogs",
+          TRUE ~ team_name)
+}
+
+clean_UpcomingRound_fixtures_wide <- raw_UpcomingRound_fixtures |> 
+    mutate(across(
+        c(home_team, away_team),
+        ~map_city_to_team_name(.x)
+        )) |> # keeping consistent formatting
+  arrange(date) |> 
+  mutate(
+    match_id = (params$comp*10000L+params$round_number*100L) + row_number(),
+    time_clean = str_remove(time, "^[A-Za-z]{3}\\s+"),
+    utc_start = ymd_hm(paste(date, time)) 
+  ) |> # keeping consistent formatting
+  select(match_id, round, home = home_team, away = away_team, utc_start, season)
+
+clean_UpcomingRound_fixtures_long <- clean_UpcomingRound_fixtures_wide |> 
+  pivot_longer(
+    home:away,
+    values_to = "team_name",
+    names_to = "team_location"
+  ) |> 
+  mutate(team = str_extract(team_name, "\\w+$")) |> 
+  select(team, match_id, round, season, team_location, utc_start)
+```
+
+
+```{r}
+clean_player_firstname <- function(firstname) {
+  
+  case_when(
+      firstname == "KL" ~ "Kayal",
+      firstname == "Sebastian" ~ "Seb",
+      firstname == "Leka" ~ "Selumiela",
+      T ~ firstname
+      )
+}
+clean_player_surname <- function(surname) {
+  
+  case_when(
+      surname == "Vaimauga" ~ "Sifakula",
+      T ~ surname
+      )
+}
+```
+
+```{r}
+raw_UpcomingRound_lineup_NaiveMatch <- raw_UpcomingRound_lineups |> 
+  rename(
+    firstname = first_name, 
+    surname = last_name,
+    position = role) |> 
+  mutate(
+    team = ifelse(team == "Wests Tigers", "Tigers", team),
+    team = ifelse(team == "Sea Eagles", "Eagles", team),
+    position = case_when(
+      position == "Winger" ~ "Wing",
+      position == "2nd" ~ "Second Row",
+      T ~ position),
+    firstname = clean_player_firstname(firstname), # Cleaning historical culprits
+    surname = clean_player_surname(surname) # Cleaning historical culprits
+    ) |> # keeping consistent formatting
+  filter(position != "Reserve") |> # reserves rarely get on, so remove for now
+  left_join(player_key, by = c("firstname", "surname")) # naive join with player key
+
+
+raw_UpcomingRound_lineup_UnMatched <- raw_UpcomingRound_lineup_NaiveMatch |> 
+  filter(is.na(player_id)) |> 
+  select(-player_id)
+
+
+raw_UpcomingRound_lineup_FuzzyMatch <- stringdist_left_join( 
+  raw_UpcomingRound_lineup_UnMatched,
+  player_key,
+  by = c("firstname", "surname"),
+  method = "jw",
+  max_dist = 0.22
+) |> 
+  rename(firstname = firstname.x, surname = surname.x) |> 
+  select(-firstname.y, -surname.y)
+
+
+raw_UpcomingRound_lineup_NewPlayers <- raw_UpcomingRound_lineup_FuzzyMatch |> 
+      filter(is.na(player_id)) |> 
+      select(firstname, surname, player_id)
+
+
+updated_player_key <- player_key |> 
+  bind_rows(
+    raw_UpcomingRound_lineup_NewPlayers
+  ) |> 
+  arrange(player_id) |> 
+  mutate(
+    player_id = accumulate(player_id, ~ ifelse(is.na(.y), .x + 1, .y))
+  )
+write_csv(updated_player_key, here("Data/01_Raw/Player Key.csv"))
+
+
+NewPlayer_key <- raw_UpcomingRound_lineup_NewPlayers |> 
+  select(-player_id) |> 
+  left_join(updated_player_key, by = c("firstname", "surname"))
+
+
+clean_UpcomingRound_lineup <- raw_UpcomingRound_lineup_NaiveMatch |> 
+  drop_na(player_id) |> 
+  bind_rows(
+    raw_UpcomingRound_lineup_FuzzyMatch |> 
+      left_join(NewPlayer_key, by = c("firstname", "surname")) |> 
+      rename(player_id = player_id.x) |> 
+      mutate(player_id = ifelse(is.na(player_id), player_id.y, player_id)) |> 
+      select(-player_id.y)
+    ) |> 
+  select(player_id, firstname, surname, team, position) |> 
+  left_join(
+    clean_UpcomingRound_fixtures_long,
+    by = c("team")
+  ) |> 
+  rename(team_name = team)
+```
+
+
+```{r}
+clean_UpcomingRound_ladder <- raw_UpcomingRound_ladder |> 
+  janitor::clean_names() |> # cleans names if format changes
+  rename(ladder_points = points) |> # clearer name
+  arrange(
+    desc(ladder_points), 
+    desc(points_diff), 
+    desc(points_for)
+  ) |> # nrl ladder order
+  mutate(
+    season = params$season,
+    round = params$round_number,
+    ladder_position = row_number(), # after arrangin in ladder order, row_number is the position
+    team = case_when(
+      team == "Wests Tigers" ~ "Tigers",
+      team == "Sea Eagles" ~ "Eagles",
+      T ~ team)
+    ) |> 
+  select(colnames(historical_ladder)) # select columns from historical data
+```
+
+# Engineer Features
+
+```{r}
+compute_elo <- function(df, k) {
+  
+  elo.run(
+    result ~ team_home + team_away,
+    data = df,
+    k = k
+  ) |> 
+    as_tibble() |> 
+  bind_cols(df |> select(utc_start)) |> # select date from elo input
+  arrange(desc(utc_start)) |> 
+  select(team_home = team.A, team_away = team.B, elo_home = elo.A, elo_away = elo.B, utc_start) |> 
+  pivot_longer(
+    cols = team_home:elo_away,
+    names_to = c(".value", "team_location"),
+    names_sep = "_"
+  ) |> 
+  arrange(utc_start) |> 
+  group_by(team) |> 
+  mutate(elo = lag(elo),
+         elo = replace_na(elo, 1500)) |> 
+    ungroup()
+}
+
+# input vector x, and degree of weighting for rolling forms lambda. Get lagged rolling forms output.
+rolling_lambda <- function(x, lambda) {
+  lag(purrr::accumulate(x, ~lambda*.x + (1-lambda)*.y), 1)
+}
+
+```
+
+```{r}
+team_rest_ladder_features <- updated_historical_team |> 
+  bind_rows(clean_UpcomingRound_fixtures_long |> rename(team_name = team)) |> 
+  group_by(competition_id, team_name) |> 
+  arrange(team_name, utc_start) |> 
+  mutate(
+    days_rest = as.double(utc_start - lag(utc_start)),
+    days_rest = ifelse(days_rest > 50, NA, days_rest),
+    team = str_extract(team_name, "\\w+$")
+    ) |> 
+  ungroup() |> 
+  left_join(
+    updated_historical_ladder |> 
+      bind_rows(clean_UpcomingRound_ladder), 
+    by = c("team", "season", "round")
+    ) |> 
+  select(-team, -comp) |> 
+  rename(
+    ladder_points_for = points_for, 
+    ladder_points_against = points_against, 
+    ladder_points_diff = points_diff
+    )
+```
+
+```{r}
+# Elos
+
+elo_input <- team_rest_ladder_features |> 
+  select(match_id, utc_start, team_name, team_location, score) |> 
+  rename(team = team_name) |> 
+  pivot_wider(
+    id_cols = c(match_id, utc_start),
+    names_from = team_location,
+    values_from = c(team, score)
+  ) |> 
+  mutate(
+    result = case_when(
+    score_home > score_away ~ 1,
+    score_home < score_away ~ 0,
+    score_home == score_away ~ 0.5,
+    T ~ 0
+  )) |> 
+  arrange(utc_start)
+
+elo_model <- compute_elo(elo_input, k = params$elo_k)
+
+recent_elo_model <- compute_elo(elo_input, k = 10) |> 
+  rename(shortelo = elo)
+
+long_elo_model <- compute_elo(elo_input, k = 40) |> 
+    rename(longelo = elo)
+
+team_elo_features <- elo_input |> 
+  select(utc_start, match_id, team_home, team_away) |>
+  pivot_longer(
+    cols = team_home:team_away,
+    names_to = c(".value", "team_location"),
+    names_sep = "_"
+  ) |> 
+  left_join(elo_model) |> 
+  left_join(recent_elo_model) |> 
+  left_join(long_elo_model)
+```
+
+```{r}
+team_features <- team_rest_ladder_features |> 
+  left_join(
+    team_elo_features |> 
+      select(match_id, team, elo, shortelo, longelo) |> 
+      rename(team_name = team), 
+    by = c("match_id", "team_name")
+    ) |> 
+  mutate(result = score) |> 
+  arrange(utc_start) |> 
+  group_by(team_name) |> 
+  mutate(across(
+    score:goal_line_dropouts,
+    ~ rolling_lambda(., params$lambda) # uses rolling forms, lagged so that future stats are not leaked
+    )) |> 
+  mutate(across(
+    ladder_points:ladder_position, # ensures future ladder is not leaked
+    ~ lag(.x, n = 1)
+  )) |> 
+  ungroup() |> 
+  mutate(
+    season_stage = factor(case_when(
+      round < 12 ~ "Early",
+      round >= 12 & round <= 19 ~ "Mid",
+      round > 19 ~ "Late"
+      ), 
+      levels = c("Early", "Mid", "Late"))
+    )
+```
+
+```{r}
+
+player_statistics <- updated_historical_player |> 
+  bind_rows(clean_UpcomingRound_lineup) |> 
+  unite("name", firstname:surname, sep = "_") |> 
+  mutate(
+    possessions = ifelse(possessions == 0, NA, possessions), 
+    goals_per_kick = (conversions+penalty_goals) / (conversion_attempts+penalty_goal_attempts)
+    ) |> 
+  select(
+    -conversions, 
+    -conversion_attempts, 
+    -penalty_goals, 
+    -penalty_goal_attempts,
+    -runs_hitup,
+    -runs_normal, 
+    -runs_hitup_metres, 
+    -runs_normal_metres, 
+    -tackleds, 
+    -handling_errors, 
+    -post_contact_metres
+    ) |> 
+  left_join(
+    params$position_minutes_weights, 
+    by = "position"
+    ) |> 
+  mutate(
+    m_per_run=run_metres/runs,
+    tb_per_run=tackle_breaks/runs,
+    lb_per_run=line_breaks/runs,
+    offs_per_run=offloads/runs, # Attacking Runs
+    
+    ta_per_touch=try_assists/possessions,
+    lba_per_touch=line_break_assists/possessions,
+    kick_per_touch=kicks_general_play/possessions,
+    pass_per_touch=passes/possessions,
+    km_per_kick=ifelse(kicks_general_play ==0, NA, kick_metres/kicks_general_play), # Attacking Play-making
+    
+    tries_per_game=tries,
+    err_per_touch=errors/possessions,
+    points_per_game=points, # Attacking Overall
+    
+    tackles_time=tackles/w,
+    saves_per_game=try_saves, # Defensive Work
+    
+    miss_per_t=missed_tackles/tackles,
+    pen_per_t=penalties_conceded/tackles,
+    ineff_per_t=tackles_ineffective/tackles # Defensive Discipline
+  ) |> 
+  select(-(points:penalties_conceded)) |> 
+  group_by(player_id) |> 
+  arrange(player_id, utc_start) |> 
+  select(
+    utc_start, 
+    name, 
+    player_id, 
+    team_name, 
+    position, 
+    match_id, 
+    competition_id, 
+    season, 
+    round,
+    team_location, 
+    w,
+    everything()
+    ) |> 
+  mutate(across(
+    goals_per_kick:ineff_per_t,
+    ~ rolling_lambda(., params$lambda) # uses rolling forms, lagged so that future stats are not leaked
+    )) |> 
+  ungroup()
+```
+
+```{r}
+player_features <- player_statistics |> 
+  group_by(match_id, team_name) |> 
+  summarise(
+    utc_start = first(utc_start),
+    comp_id = first(competition_id),
+    season = first(season),
+    round = first(round),
+    team_location = first(team_location),
+    across(goals_per_kick:ineff_per_t, ~ mean(.x, na.rm = TRUE)) # Averaging statistics across team, may change to weighted averages later
+    ) |> 
+  ungroup()
+```
+
+```{r}
+features_data <- player_features |> 
+  left_join(
+    team_features |> 
+      select(-utc_start, -team_location, -competition_id, -round, -season), 
+    by = c("match_id", "team_name")) |> 
+  select(result, everything()) |> 
+  pivot_wider(
+    id_cols = c(match_id, utc_start, round, season_stage),
+    names_from = team_location,
+    values_from = c(result, team_name, goals_per_kick:longelo),
+    names_sep = "_"
+  ) |> 
+  mutate(
+    result = factor(case_when(
+      result_home > result_away ~ "H",
+      result_away > result_home ~ "A",
+      T ~ "A"))
+    ) |> # making target variable (binary classification)
+  rename(date = utc_start) |> # clearer name
+  rename(
+    home_team = team_name_home, 
+    away_team = team_name_away,
+    away_result = result_away, 
+    home_result = result_home
+    ) |> # cleaning names and also avoiding below function
+    mutate(
+    across(ends_with("_home"),
+           ~ .-get(str_replace(cur_column(), "_home$", "_away")),
+           .names = "{str_remove(.col,'_home$')}_diff"
+           )
+    ) |> # This function takes the difference between _home and _away variables, creating _diff variables.
+  mutate(
+    prhome = 1 / (1 + 10^( (elo_away - elo_home) / 400) ),
+    shortprhome = 1 / (1 + 10^( (shortelo_away - shortelo_home) / 400) ),
+    longprhome = 1 / (1 + 10^( (longelo_away - longelo_home) / 400) )
+  ) |> # pr of winning based on elo ratings
+  mutate(across(
+    goals_per_kick_away:ladder_position_diff,
+    ~ replace_na(.x, 0)
+    )) |> # ok to impute this statistics like this, NAs are typically zeroes or didn't actually get the stat
+  mutate(across(
+    where(is.numeric),
+    ~ ifelse(is.finite(.), ., NA_real_)
+    )) # figure out cause of this, only 1 or 2 in a few columns
+
+write_csv(features_data, here("Data/02_Features/feature_engineered_df.csv"))
+```
+
+
+# Fit Model and Predict
+
+## Data Split
+
+```{r}
+cutoff <- floor_date(Sys.Date(), unit = "weeks", week_start = 2)
+
+train_data <- features_data |>  filter(date < cutoff)
+pred_data  <- features_data |>  filter(date >= cutoff)
+```
+
+## Model Parameters
+
+```{r}
+model_parameters <- readRDS(here("Outputs/model_parameters.rds"))
+```
+
+## Model specification
+
+```{r}
+define_XgBoost_model_specification <- function(model_parameters) {
+  boost_tree(
+    trees = 1000,
+    tree_depth = model_parameters$tree_depth,
+    min_n = model_parameters$min_n,
+    loss_reduction = model_parameters$loss_reduction,
+    sample_size = model_parameters$sample_size,
+    mtry = model_parameters$mtry,
+    learn_rate = model_parameters$learn_rate
+  ) |> 
+    set_engine(
+      "xgboost",
+      nthread = 4,
+      objective = "binary:logistic",
+      eval_metric = "logloss"
+      ) |> 
+    set_mode("classification")
+}
+
+
+model_specification <- define_XgBoost_model_specification(model_params)
+```
+
+## Data Preprocessing Recipe
+
+```{r}
+data_recipe <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(
+    home_result, away_result, # target variable proxies
+    home_team, away_team, # Noisy, 17 factors
+    date, round) |> # Using season stage for this
+  step_zv(all_predictors()) |> # Remove predictors that are constant "no predictive value"
+  step_novel(all_nominal_predictors()) |> # assigns unseen factor levels "new"
+  step_dummy(all_nominal_predictors()) # dummies factor variables
+```
+
+## Modelling workflow
+
+```{r}
+modelling_workflow <- workflow() |> 
+  add_model(model_specification) |> 
+  add_recipe(data_recipe)
+```
+
+## Fitting Model
+
+```{r}
+set.seed(234)
+
+model_fit <- fit(modelling_workflow, data = train_data)
+
+upcoming_predictions <- model_fit |> 
+  predict(new_data = pred_data, type = "prob") |> 
+  bind_cols(pred_data) |> 
+  select(
+    date,
+    match_id,
+    home_team,
+    away_team,
+    home_prediction = .pred_H,
+    away_prediction = .pred_A
+    ) |> 
+  mutate(prediction = ifelse(home_prediction > away_prediction, home_team, away_team))
+```
+
+## Model Metadata
+
+```{r}
+model_filename <- paste0("Models/", "model_metadata_", params$season, "_round", params$round_number, ".rds")
+
+model_metadata <- list(
+  model = model_specification$engine,
+  parameters = model_parameters,
+  metric = "logloss",
+  trained_on = Sys.Date(),
+  feature_version = "v1",
+  notes = paste0("season ",params$season, " round ", params$round_number, " predictions")
+)
+
+write_rds(model_metadata, here(model_filename))
+```
+
+
+# Create Outputs
+
+## Predictions Log
+
+```{r}
+historical_predictions_data <- read_csv(here("Data/03_Outputs/prediction_log.csv"))
+
+updated_predictions <- bind_rows(
+  historical_predictions_data,
+  upcoming_predictions
+  ) |> 
+  group_by(date, away_team, home_team) |> 
+  slice_head(n = 1) |> # Removes duplicate records
+  ungroup() 
+
+write_csv(predictions, here("Outputs/prediction_log.csv"))
+```
+
+## Odds Log
+
+```{r}
+historical_odds_log <- read_csv(here("Data/03_Outputs/odds_log.csv")) |> 
+  mutate(
+    date = as_datetime(date),
+    last_update = as_datetime(last_update)
+    )
+
+new_odds_log_data <- upcoming_predictions |> 
+  right_join(
+      odds_raw,
+      by = c("home_team", "away_team")
+  ) |> 
+  select(colnames(historical_odds_log)) |> 
+  drop_na(match_id)
+
+updated_odds_log <- bind_rows(
+  historical_odds_log,
+  new_odds_log_data) |> 
+  group_by(match_id, bookmaker) |> 
+  slice_tail(n = 1) |> # Keeps updated version instead? Improve this later.
+  ungroup()
+
+write_csv(updated_odds_log, here("Data/03_Outputs/odds_log.csv"))
+```
+
+## Bets Log
+
+```{r}
+historical_bets_log <- read_csv(here("Data/03_Outputs/bets_log.csv")) |> 
+  mutate(date = as_datetime(date)) |> 
+  drop_na(match_id)
+
+new_bets_log <- upcoming_predictions |> 
+  right_join(
+      odds_raw,
+      by = c("home_team", "away_team")
+  ) |> 
+  group_by(match_id) |> 
+  mutate(
+    best_home_odds = max(home_team_odds),
+    best_away_odds = max(away_team_odds),
+    home_ev = home_prediction * best_home_odds - 1,
+    away_ev = away_prediction * best_away_odds - 1,
+    ev_bet = ifelse(home_ev > away_ev, home_team, away_team),
+    odd_diff = ifelse(home_ev >= away_ev, best_home_odds - home_team_odds, best_away_odds - away_team_odds)
+    ) |> 
+  arrange(odd_diff) |> 
+  select(colnames(historical_bets_log)) |> 
+  ungroup() |> 
+  drop_na(match_id)
+
+updated_bets_log <- bind_rows(
+  historical_bets_log,
+  new_bets_log) |> 
+  group_by(match_id) |> 
+  slice_tail(n = 1) |> # Keeps updated version instead? Improve this later.
+  ungroup()
+
+write_csv(updated_bets_log, here("Data/03_Outputs/bets_log.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

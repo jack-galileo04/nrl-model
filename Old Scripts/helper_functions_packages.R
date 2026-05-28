@@ -1,0 +1,36 @@
+# Packages
+required <- c(
+  "tidyverse",
+  "tidymodels",
+  "here",
+  "vip",
+  "yardstick",
+  "janitor",
+  "readxl",
+  "lubridate"
+)
+
+#install.packages(setdiff(required, installed.packages()[,"Package"]))
+
+
+# Logging Results Function (adds results to a csv to track progress on model performances)
+
+log_path <- here::here("Outputs/experiments_log.csv")
+
+log_experiment <- function(algorithm, feature_set, resample_scheme, logloss, notes = "") {
+  
+  entry <- tibble::tibble(
+    timestamp = Sys.time(),
+    algorithm = algorithm,
+    feature_set = feature_set,
+    resample_scheme = resample_scheme,
+    logloss = logloss,
+    notes = notes
+  )
+  
+  if (!file.exists(log_path)) {
+    readr::write_csv(entry, log_path)
+  } else {
+    readr::write_csv(entry, log_path, append = TRUE)
+  }
+}
