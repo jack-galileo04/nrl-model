@@ -123,13 +123,16 @@ This ensures the outputs always align with the latest code and data, improving r
 
 ## 🛠 Tech Stack
 
-R
-{targets} (pipeline orchestration)
-{tidyverse} (data wrangling)
-{tidymodels} (modelling)
-{httr} / {jsonlite} (API access)
-{Power BI} (reporting)
-{MS Excel} (reporting)
+R:
+- {targets} (pipeline orchestration)
+- {tidyverse} (data wrangling)
+- {tidymodels} (modelling)
+- {httr} / {jsonlite} (API access)
+Power BI:
+- Power Query
+- DAX
+Excel:
+- Power Query
 
 ---
 
