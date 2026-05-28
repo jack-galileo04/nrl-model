@@ -50,7 +50,7 @@ This project follows a structured pipeline:
 
 7. **Reporting**
    - Predictions log excel workbook (to easily update with Bet365 closing lines)
-   - Import into Power BI for reporting performance KPIs and trends (CLV, accuracy, logloss, fictional roi)
+   - Import into Power BI for reporting performance KPIs and trends (closing line value, accuracy, logloss, and fictional rate of return)
 
 ---
 
