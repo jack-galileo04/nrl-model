@@ -82,16 +82,27 @@ This ensures the outputs always align with the latest code and data, improving r
 ## 📂 Project Structure
 .
 ├── run_pipeline.R          # helper script for managing the pipeline
+
 ├── _targets.R              # pipeline definition
+
 ├── R/                      # functions (data, features, modelling)
+
 ├── Data/
+
 │   ├── 01_Raw/             # Raw data before feature engineering
-│   ├── 02_Features/        # Features data set (useful for modelling sandbox)
+
+│   ├── 02_Features/        # Features data set (useful for modelling sandbox
+
 │   └── 03_Outputs/         # Reporting outputs
+
 ├── Outputs                 # Pipeline outputs (model parameters, api tokens, model experiments log)
+
 ├── .gitignore
+
 ├── Prediction Log.xlsx
+
 ├── NRL Model Performance Report.pbix
+
 └── README.md
 
 ---
