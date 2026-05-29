@@ -53,6 +53,8 @@ This project follows a structured pipeline:
    - Import into Power BI for reporting performance KPIs and trends (closing line value, accuracy, logloss, and fictional rate of return)
    - View the report: [Report](https://app.powerbi.com/view?r=eyJrIjoiZTU3ZTc0NzAtN2JmNC00ZWRlLTk2ZjgtZGMyY2I2ODFjZDQ3IiwidCI6IjNhYTEyYWIxLWQyNGEtNGI0Yy04YjI0LTk5ZWI3ODE2YzJjZSJ9&pageName=662e1d2e2b358634c3d6)
 
+Note: The report was built before the model was completely finalised; hence, some inaccurate predictions are shown. This is intentional, as the report will remain despite continuous improvement in the models.
+
 ---
 
 ## 🧠 Modelling Approach (tidymodels)
