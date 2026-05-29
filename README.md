@@ -136,7 +136,7 @@ R:
 - {tidyverse} (data wrangling)
 - {tidymodels} (modelling)
 - {httr} / {jsonlite} (API access)
-- 
+
 Power BI:
 - Power Query
 - DAX
