@@ -152,7 +152,7 @@ Excel:
 - Implement more safeguards
 - Move storage to a database
 
-- Improve feature engineering (e.g. injuries, travel, weather, head to head, venue record, variances)
+- Improve feature engineering (e.g. injuries, travel, weather, head-to-head, venue record, variances)
 - Improve modelling framework (historical odds calibration, Bayesian hierarchical models, ensemble stacking)
 - Enhance model explainability (move to penalised logistic regression, incorporate model selection and visualisations into pipeline)
 
@@ -161,7 +161,7 @@ Excel:
 ---
 
 ## 🙌 Acknowledgements
-NRL data sources, nrlR package, Odds API, and open-source R ecosystem
+NRL data sources, nrlR package, Odds API, and the open-source R ecosystem
 
 
 
