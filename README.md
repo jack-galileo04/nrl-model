@@ -109,8 +109,8 @@ This ensures the outputs always align with the latest code and data, improving r
 
 ## Results
 
-- Best logloss (probability calibration) on train/test split was 0.58 (baseline for binary classification is generally 0.693)
-- Current closing line value (indicator of betting edge if positive) is 3.7%, but is NOT statistically significant according to a right-tailed t-test at 95% confidence.
+- Best logloss (probability calibration) on train/test split was 0.58 (uninformative model baseline for binary classification is 0.693)
+- Current closing line value (indicator of betting edge if positive) is 3.7%, but is NOT statistically significant according to a right-tailed t-test at 95% confidence
 
 ---
 
