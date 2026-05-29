@@ -92,7 +92,7 @@ This ensures the outputs always align with the latest code and data, improving r
 
 │   ├── 01_Raw/             # Raw data before feature engineering
 
-│   ├── 02_Features/        # Features data set (useful for modelling sandbox
+│   ├── 02_Features/        # Features data set (useful for modelling sandbox)
 
 │   └── 03_Outputs/         # Reporting outputs
 
