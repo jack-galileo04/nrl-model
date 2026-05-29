@@ -152,8 +152,8 @@ Excel:
 - Move storage to a database
 
 - Improve feature engineering (e.g. injuries, travel, weather, head to head, venue record, variances)
-- Improve modelling framework
-- Enhance model explainability
+- Improve modelling framework (historical odds calibration, Bayesian hierarchical models, ensemble stacking)
+- Enhance model explainability (move to penalised logistic regression, incorporate model selection and visualisations into pipeline)
 
 - Expand to more rugby league competitions
 
