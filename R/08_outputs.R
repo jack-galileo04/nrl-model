@@ -28,7 +28,7 @@ pull_new_bets_log_data <- function(upcoming_predictions, odds_raw, historical_be
       ev_bet = ifelse(home_ev > away_ev, home_team, away_team),
       odd_diff = ifelse(home_ev >= away_ev, best_home_odds - home_team_odds, best_away_odds - away_team_odds)
     ) |> 
-    arrange(odd_diff) |> 
+    slice_min(order_by = odd_diff, n = 1, with_ties = FALSE) |> 
     select(colnames(historical_bets_log)) |> 
     ungroup() |> 
     drop_na(match_id)
@@ -41,18 +41,19 @@ pull_new_bets_log_data <- function(upcoming_predictions, odds_raw, historical_be
 update_predictions_log <- function(historical_predictions_log, upcoming_predictions) {
   
   bind_rows(
-    historical_predictions_log,
-    upcoming_predictions
+    upcoming_predictions,
+    historical_predictions_log
   ) |> 
-    distinct(date, away_team, home_team, .keep_all = TRUE) # removing duplicates
+    distinct(match_id, .keep_all = TRUE) # removing duplicates
   
 }
 
 update_odds_log <- function(historical_odds_log, new_odds_log_data) {
   
   bind_rows(
-    historical_odds_log,
-    new_odds_log_data) |> 
+    new_odds_log_data,
+    historical_odds_log
+    ) |> 
     distinct(match_id, bookmaker, .keep_all = TRUE)
   
 }
@@ -60,8 +61,9 @@ update_odds_log <- function(historical_odds_log, new_odds_log_data) {
 update_bets_log <- function(historical_bets_log, new_bets_log) {
   
   bind_rows(
-    historical_bets_log,
-    new_bets_log) |> 
+    new_bets_log,
+    historical_bets_log
+    ) |> 
     distinct(match_id, .keep_all = TRUE) # removing duplicates
   
 }

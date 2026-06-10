@@ -13,7 +13,7 @@ tar_option_set(
   )
 )
 
-# Pipeline
+# Pipeline (change the csv reading to file targets, and read into data frames donw stream)
 
 list(
   
@@ -23,10 +23,14 @@ list(
   # add database connection later
   
   # load historical data
-  tar_target(historical_ladder, read_csv(here("Data/01_Raw/Ladder Data.csv"))),
-  tar_target(historical_player, read_csv(here("Data/01_Raw/Player Data.csv"))),
-  tar_target(historical_team, read_csv(here("Data/01_Raw/Team Data.csv"))),
-  tar_target(player_key, read_csv(here("Data/01_Raw/Player Key.csv"))),
+  tar_target(historical_ladder, read_csv(here("Data/01_Raw/Ladder Data.csv")),
+             cue = tar_cue(mode = "always")),
+  tar_target(historical_player, read_csv(here("Data/01_Raw/Player Data.csv")),
+             cue = tar_cue(mode = "always")),
+  tar_target(historical_team, read_csv(here("Data/01_Raw/Team Data.csv")),
+             cue = tar_cue(mode = "always")),
+  tar_target(player_key, read_csv(here("Data/01_Raw/Player Key.csv")),
+             cue = tar_cue(mode = "always")),
   
   # fetch previous round data
   tar_target(PreviousRound_ladder_raw, fetch_PreviousRound_ladder_raw(params),
@@ -87,7 +91,7 @@ list(
              format = "file"),
   tar_target(historical_team_file, 
              {
-               path <- here("Data/01_Raw/Player Key.csv")
+               path <- here("Data/01_Raw/Team Data.csv")
                write_csv(historical_team_updated, path)
                path
              },
@@ -122,9 +126,12 @@ list(
              build_XgBoost_model_metadata(params)),
   
   # load output logs
-  tar_target(historical_predictions_log, read_csv(here("Data/03_Outputs/prediction_log.csv"))),
-  tar_target(historical_odds_log, read_csv(here("Data/03_Outputs/odds_log.csv"))),
-  tar_target(historical_bets_log, read_csv(here("Data/03_Outputs/bets_log.csv"))),
+  tar_target(historical_predictions_log, read_csv(here("Data/03_Outputs/prediction_log.csv")),
+             cue = tar_cue(mode = "always")),
+  tar_target(historical_odds_log, read_csv(here("Data/03_Outputs/odds_log.csv")),
+             cue = tar_cue(mode = "always")),
+  tar_target(historical_bets_log, read_csv(here("Data/03_Outputs/bets_log.csv")),
+             cue = tar_cue(mode = "always")),
   
   # Get new output log entries
   tar_target(new_odds_log_data, pull_new_odds_log_data(upcoming_predictions, odds_raw, historical_odds_log)),

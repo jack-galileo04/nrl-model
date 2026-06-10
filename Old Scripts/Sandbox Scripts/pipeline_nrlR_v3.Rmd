@@ -23,7 +23,7 @@ read_params <- function(){
   
   list(
     season = 2026,
-    round_number = 13,
+    round_number = 14,
     week_start = 2,
     
     lambda = 0.94, # Degree of recency bias in rolling form variables
@@ -188,7 +188,7 @@ get_nrl_odds <- function(api_key) {
 # Function that caches, limits, and keeps fetch robust
 odds_API_fetch <- function() {
   
-  api_key <- readRDS(here("Config/api_key.rds")) # fix later
+  api_key <- Sys.getenv("API_KEY")
   
   odds_api <- get_nrl_odds(api_key)
         
@@ -590,13 +590,18 @@ historical_team_updated <- update_historical_team(historical_team, PreviousRound
 player_key_updated <- update_player_key(updated_player_key)
 ```
 
-```{r}
+```{r}#
 write_csv(historical_ladder_updated, here("Data/01_Raw/Ladder Data.csv"))
 write_csv(historical_player_updated, here("Data/01_Raw/Player Data.csv"))
 write_csv(historical_team_updated, here("Data/01_Raw/Team Data.csv"))
 write_csv(player_key_updated, here("Data/01_Raw/Player Key.csv"))
 ```
 
+```{r}
+historical_team_updated <- historical_team
+historical_player_updated <- historical_player
+historical_ladder_updated <- historical_ladder
+```
 
 # Feature Engineering
 
@@ -643,7 +648,7 @@ build_TeamContext_features <- function(historical_team_updated, historical_ladde
   mutate(
     days_rest = as.double(utc_start - lag(utc_start)),
     days_rest = ifelse(days_rest > 50, NA, days_rest),
-    team = str_extract(team_name, "\\w+$"),
+    team_name = str_extract(team_name, "\\w+$"),
     season_stage = factor(case_when(
       round < 12 ~ "Early",
       round >= 12 & round <= 19 ~ "Mid",
@@ -654,10 +659,11 @@ build_TeamContext_features <- function(historical_team_updated, historical_ladde
   ungroup() |> 
   left_join(
     historical_ladder_updated |> 
-      bind_rows(UpcomingRound_ladder_clean), 
-    by = c("team", "season", "round")
+      bind_rows(UpcomingRound_ladder_clean) |> 
+      rename(team_name = team), 
+    by = c("team_name", "season", "round")
     ) |> 
-  select(-team, -comp) |> 
+  select(-comp) |> 
   rename(
     ladder_points_for = points_for, 
     ladder_points_against = points_against, 
@@ -681,8 +687,9 @@ build_elo_input <- function(TeamContext_features) {
       score_home > score_away ~ 1,
       score_home < score_away ~ 0,
       score_home == score_away ~ 0.5,
-      T ~ 0
-    )) |> 
+      T ~ 0)
+      ) |> 
+    select(match_id, utc_start, team_home, team_away, score_home, score_away, everything()) |> 
     arrange(utc_start)
   
 }
@@ -833,7 +840,8 @@ combine_player_features <- function(player_statistics) {
       team_location = first(team_location),
       across(goals_per_kick:ineff_per_t, ~ mean(.x, na.rm = TRUE)) # Averaging statistics across team, may change to weighted averages later
       ) |> 
-    ungroup()
+    ungroup() |> 
+    mutate(team_name = str_extract(team_name, "\\w+$"))
   
 }
 ```
@@ -1115,26 +1123,6 @@ write_csv(predictions_log_updated, here("Data/03_Outputs/prediction_log.csv"))
 write_csv(odds_log_updated, here("Data/03_Outputs/odds_log.csv"))
 write_csv(bets_log_updated, here("Data/03_Outputs/bets_log.csv"))
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

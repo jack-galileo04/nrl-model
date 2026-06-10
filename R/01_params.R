@@ -4,7 +4,7 @@ read_params <- function(){
   
   list(
     season = 2026,
-    round_number = 13,
+    round_number = 15,
     week_start = 2,
     
     lambda = 0.94, # Degree of recency bias in rolling form variables

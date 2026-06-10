@@ -40,7 +40,7 @@ build_TeamContext_features <- function(historical_team_updated, historical_ladde
     mutate(
       days_rest = as.double(utc_start - lag(utc_start)),
       days_rest = ifelse(days_rest > 50, NA, days_rest),
-      team = str_extract(team_name, "\\w+$"),
+      team_name = str_extract(team_name, "\\w+$"),
       season_stage = factor(case_when(
         round < 12 ~ "Early",
         round >= 12 & round <= 19 ~ "Mid",
@@ -51,10 +51,11 @@ build_TeamContext_features <- function(historical_team_updated, historical_ladde
     ungroup() |> 
     left_join(
       historical_ladder_updated |> 
-        bind_rows(UpcomingRound_ladder_clean), 
-      by = c("team", "season", "round")
+        bind_rows(UpcomingRound_ladder_clean) |> 
+        rename(team_name = team), 
+      by = c("team_name", "season", "round")
     ) |> 
-    select(-team, -comp) |> 
+    select(-comp) |> 
     rename(
       ladder_points_for = points_for, 
       ladder_points_against = points_against, 
@@ -80,6 +81,7 @@ build_elo_input <- function(TeamContext_features) {
         score_home == score_away ~ 0.5,
         T ~ 0
       )) |> 
+    select(match_id, utc_start, team_home, team_away, score_home, score_away, everything()) |>
     arrange(utc_start)
   
 }
@@ -231,7 +233,8 @@ combine_player_features <- function(player_statistics) {
       team_location = first(team_location),
       across(goals_per_kick:ineff_per_t, ~ mean(.x, na.rm = TRUE)) # Averaging statistics across team, may change to weighted averages later
     ) |> 
-    ungroup()
+    ungroup() |> 
+    mutate(team_name = str_extract(team_name, "\\w+$"))
   
 }
 

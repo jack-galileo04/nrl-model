@@ -9,6 +9,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(tidymodels)
 library(vip)
+library(iml)
 
 library(lubridate)
 library(here)
@@ -18,7 +19,7 @@ library(rsample)
 ```
 
 ```{r}
-nrl_odds <- read_excel(here("Data/Raw/nrl.xlsx"), skip = 1) |> 
+nrl_odds <- read_excel(here("Data/01_Raw/NRL Odds Data.xlsx"), skip = 1) |> 
   janitor::clean_names() |> 
   arrange(date) |> 
   select(date, home_team, away_team, 
@@ -33,6 +34,7 @@ nrl_odds <- read_excel(here("Data/Raw/nrl.xlsx"), skip = 1) |>
 
 ```{r}
 model_data <- read_csv(here("Data/02_Features/feature_engineered_df.csv"))
+# model_data <- features_data
 ```
 
 
@@ -56,12 +58,20 @@ folds <- rolling_origin(
   cumulative = TRUE
 )
 
-metrics <- yardstick::metric_set(mn_log_loss, accuracy, roc_auc)
+metrics <- yardstick::metric_set(mn_log_loss, roc_auc, accuracy, sens, spec)
 ```
 
 ```{r Model Recipes}
-
 xgb_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(home_result, away_result,
+          home_team, away_team,
+          date, round) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors())
+
+rf_rec <- recipe(result ~ ., data = train_data) |> 
   update_role(match_id, new_role = "ID") |> 
   step_rm(home_result, away_result,
           home_team, away_team,
@@ -73,7 +83,7 @@ xgb_rec <- recipe(result ~ ., data = train_data) |>
 
 ```{r Spec}
 xgb_spec <- boost_tree(
-  trees = 1000,
+  trees = tune(),
   tree_depth = tune(), min_n = tune(), loss_reduction = tune(),
   sample_size = tune(), mtry = tune(),
   learn_rate = tune()
@@ -85,6 +95,14 @@ xgb_spec <- boost_tree(
                eval_metric = "logloss"
              )) |> 
   set_mode("classification")
+
+rf_spec <- rand_forest(
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) |> 
+  set_engine("ranger", importance = "permutation") |> 
+  set_mode("classification")
 ```
 
 ```{r Workflow}
@@ -92,13 +110,30 @@ xgb_wf <- workflow() |>
   add_model(xgb_spec) |> 
   add_recipe(xgb_rec)
 
-params <- xgb_wf |> 
+rf_wf <- workflow() |> 
+  add_model(rf_spec) |> 
+  add_recipe(rf_rec)
+
+xgb_params <- xgb_wf |> 
   extract_parameter_set_dials() |> 
   finalize(train_data)
 
-grid <- grid_space_filling(
-  params,
-  size = 20
+rf_params <- rf_wf |> 
+  extract_parameter_set_dials() |> 
+  update(
+    mtry = mtry(c(5L, 30L)),
+    trees = trees(c(500L, 1500L)),
+    min_n = min_n(c(0L, 40L))
+  )
+
+xgb_grid <- grid_space_filling(
+  xgb_params,
+  size = 30
+)
+
+rf_grid <- grid_regular(
+  rf_params,
+  levels = 10
 )
 ```
 
@@ -108,45 +143,26 @@ set.seed(123)
 xgb_tune_res <- tune_grid(
   xgb_wf,
   resamples = folds,
-  grid = grid,
+  grid = xgb_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE),
+  metrics = metrics
+)
+
+rf_tune_res <- tune_grid(
+  rf_wf,
+  resamples = folds,
+  grid = rf_grid,
   control = control_grid(verbose = TRUE, save_pred = TRUE),
   metrics = metrics
 )
 ```
 
 ```{r}
-odds_comparison_df <- xgb_tune_res |> 
-  collect_predictions() |> 
-  bind_cols(
-    do.call(rbind, lapply(folds$splits,assessment)) |> 
-      slice(rep(row_number(), times = 20))
-  ) |> 
-  mutate(home_team_short = str_extract(home_team, "\\S+$"),
-         away_team_short = str_extract(away_team, "\\S+$")) |> 
-  left_join(nrl_odds, 
-            by = c("date", "home_team_short", "away_team_short")
-            ) |> 
-  select(1:12, match_id, date, home_team, away_team, home_result, away_result, 59:72)
-  
-```
+xgb_tune_res |> collect_metrics() |> 
+  arrange(.metric, mean)
 
-
-```{r}
-xgb_best_logloss <- xgb_tune_res |> select_best(metric = "mn_log_loss")
-xgb_logloss <- (xgb_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
-
-saveRDS(xgb_tune_res, here("Outputs/xgb_tune_res.rds"))
-saveRDS(xgb_best_logloss, here("Outputs/model_parameters.rds"))
-
-final_wf <- finalize_workflow(xgb_wf, xgb_best_logloss)
-final_fit <- fit(final_wf, data = train_data)
-
-predict(final_fit, new_data = test_data, type = "prob") |> 
-    bind_cols(test_data) |> 
-    select(match_id, date, home_team, away_team, .pred_H, .pred_A) |> 
-    mutate(pred = ifelse(.pred_H > .pred_A, home_team, away_team))
-
-saveRDS(final_wf, here("Outputs/modelling_pipeline_workflow.rds"))
+rf_tune_res |> collect_metrics() |> 
+  arrange(.metric, mean)
 ```
 
 ```{r}
@@ -162,15 +178,82 @@ xgb_tune_res |> collect_metrics() |>
   geom_point(size = 2) +
   facet_wrap(~parameter, scales = "free_x")
 
-# No real pattern here
-# Lower learn rates are better, all else seem relatively constant
+# Lower learn rates are better, likely very noisy data that is easy to over fit too.
+
+rf_tune_res |> collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  pivot_longer(
+    cols = mtry:min_n,
+    values_to = "value",
+    names_to = "parameter"
+  ) |> 
+  filter(mean < 1) |> 
+  ggplot(aes(value, mean)) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), colour = "red", linewidth = 1.5) +
+  geom_point(size = 2) +
+  facet_wrap(~parameter, scales = "free_x")
+
+# lower mtry
 ```
+
 ```{r}
-vip(final_fit, n = 15)
+odds_comparison_df <- xgb_tune_res |> 
+  collect_predictions() |> 
+  bind_cols(
+    do.call(rbind, lapply(folds$splits,assessment)) |> 
+      slice(rep(row_number(), times = 20))
+  ) |> 
+  mutate(home_team_short = str_extract(home_team, "\\S+$"),
+         away_team_short = str_extract(away_team, "\\S+$")) |> 
+  left_join(nrl_odds, 
+            by = c("date", "home_team_short", "away_team_short")
+            ) |> 
+  select(1:12, match_id, date, home_team, away_team, home_result, away_result, 59:72)
+```
+
+```{r}
+xgb_best_logloss <- xgb_tune_res |> select_best(metric = "mn_log_loss")
+xgb_logloss <- (xgb_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+rf_best_logloss <- rf_tune_res |> select_best(metric = "mn_log_loss")
+
+saveRDS(xgb_tune_res, here("Outputs/xgb_tune_res.rds"))
+saveRDS(rf_tune_res, here("Outputs/rf_tune_res.rds"))
+
+saveRDS(xgb_best_logloss, here("Outputs/model_parameters.rds"))
+
+xgb_final_wf <- finalize_workflow(xgb_wf, xgb_best_logloss)
+xgb_final_fit <- fit(xgb_final_wf, data = train_data)
+
+predict(xgb_final_fit, new_data = test_data, type = "prob") |> 
+    bind_cols(test_data) |> 
+    select(match_id, date, home_team, away_team, .pred_H, .pred_A) |> 
+    mutate(pred = ifelse(.pred_H > .pred_A, home_team, away_team))
+
+rf_final_wf <- finalize_workflow(rf_wf, rf_best_logloss)
+rf_final_fit <- fit(rf_final_wf, data = train_data)
+
+predict(rf_final_fit, new_data = test_data, type = "prob") |> 
+    bind_cols(test_data) |> 
+    select(match_id, date, home_team, away_team, .pred_H, .pred_A) |> 
+    mutate(pred = ifelse(.pred_H > .pred_A, home_team, away_team))
+
+saveRDS(final_wf, here("Outputs/modelling_pipeline_workflow.rds"))
+```
+
+```{r}
+vip(xgb_final_fit, n = 15)
+vip(rf_final_fit, n = 15)
 # team based stats like field position, elo, ladder are most important
 # probably try to combine player stats into aggregated features
 ```
 
+```{r}
+xgb_tune_res |> show_best(metric = "roc_auc")
+rf_tune_res |> show_best(metric = "roc_auc")
+xgb_tune_res |> show_best(metric = "mn_log_loss")
+rf_tune_res |> show_best(metric = "mn_log_loss")
+```
 
 
 ```{r}

@@ -50,3 +50,4 @@ rsconnect/
 
 # targets pipeline cache
 _targets/
+.positai
