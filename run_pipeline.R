@@ -1,7 +1,18 @@
 #################### helper Script to Run the targets pipeline ####################
 
-.rs.restartR()
 
+# Ensure correct package environment
+if (!requireNamespace("renv", quietly = TRUE)) install.packages("renv")
+renv::restore(prompt = FALSE)
+
+# Load targets
+library(targets)
+
+# Run pipeline
 targets::tar_make()
 
-targets::tar_visnetwork(targets_only = TRUE)
+# log file
+log_file <- paste0("logs/run_", Sys.Date(), ".log")
+dir.create("logs", showWarnings = FALSE)
+sink(log_file)
+sink(log_file, type = "message")

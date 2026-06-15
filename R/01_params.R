@@ -1,10 +1,16 @@
 #################### reading parameters, set exogenous to the pipeline #################### 
 
+get_nrl_round <- function(date = Sys.Date()) {
+  season_start <- as.Date("2026-03-03")  # adjust each season
+  round <- as.integer((date - season_start) / 7) + 1
+  return(round)
+}
+
 read_params <- function(){
   
   list(
-    season = 2026,
-    round_number = 15,
+    season = lubridate::year(Sys.Date()),
+    round_number = get_nrl_round(),
     week_start = 2,
     
     lambda = 0.94, # Degree of recency bias in rolling form variables
