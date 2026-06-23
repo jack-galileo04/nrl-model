@@ -1,4 +1,13 @@
 name|type|data|command|depend|seed|path|time|size|bytes|format|repository|iteration|parent|children|seconds|warnings|error
+params|stem|6acce39a3634ba84|09319c0cea65273e|b2425441525068b7|-675321759||t20620.4773702505s|s393b|393|rds|local|vector|||0||
+model_metadata|stem|1f470fde4e97ca84|b8250e3abe822be2|c2b10a59268d4450|-166344504||t20620.4774154372s|s393b|393|rds|local|vector|||0.02||
+UpcomingRound_fixtures_clean_long|stem|3c0f1a50ad6ce45d|18a0c47b1217cb53|7ec351906daf2d5f|905691630||t20620.477452935s|s420b|420|rds|local|vector|||0.03||
+player_key_file|stem|045a843eab518830|5171dd50fd93d675|3b3d0f0a114d5419|1574312891|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Player Key.csv|t20620.4774625611s|s25007b|25007|file|local|vector|||0.17||
+historical_ladder_file|stem|87900af0ea96a7f6|7b8304759ca9a2b0|03e535e9a59af81a|-2098160682|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Ladder Data.csv|t20620.4774664945s|s57779b|57779|file|local|vector|||0.22||
+historical_player_file|stem|27cdfde093ff5772|e3dc9e80fd1236aa|13f3a4d970e64764|-398459857|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Player Data.csv|t20620.4774705458s|s408156b|408156|file|local|vector|||0.34||
+historical_team_file|stem|cb42c2dc34eebb73|244a80af71c9025d|52598b2f5c990ec3|-1863040160|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Team Data.csv|t20620.4774854343s|s183711b|183711|file|local|vector|||0.23||
+TeamLevel_features|stem|5779f7d4bca4685f|c3792cc6d4517b9c|bb86a00d79a6ef83|1047129463||t20620.4774887727s|s185069b|185069|rds|local|vector|||0.25||
+features_data|stem|f17c2c55bf147fe6|d8dde20e09eb2c12|cbfffd1c26afb0c3|1293667363||t20620.4774899668s|s507188b|507188|rds|local|vector|||0.08||
 add_NewPlayers_player_key|function|457fe5059a5c9b7a
 build_UpcomingRound_lineup_FuzzyMatch|function|f5932d813252bdf8
 pull_UpcomingRound_lineup_NewPlayers|function|4b916acc4a16e2d7
@@ -9,7 +18,7 @@ rolling_lambda|function|f0fb0f8f11619013
 build_XgBoost_model_metadata|function|3ec55a5ed9c93911
 clean_PreviousRound_ladder|function|d7ab7befacffecaa
 update_bets_log|function|5986e32304c698a4
-read_params|function|6c254e000b5c2601
+get_nrl_round|function|738daf7722ce9ff9
 update_historical_player|function|54b8952b76976230
 update_odds_log|function|debd11d8b9b70b67
 build_lineup_url|function|c64ca0993d384d76
@@ -43,6 +52,7 @@ pull_new_odds_log_data|function|b065ddb788c0eab6
 build_UpcomingRound_lineup_NaiveMatch|function|5f0f13bc3583208b
 combine_TeamLevel_features|function|8e42dd81e7e67414
 build_player_statistics|function|e891c3f7770fa93b
+read_params|function|a2751a450006e8e3
 fetch_UpcomingRound_lineups_raw|function|a976cee9a03cf167
 build_elo_features|function|c8485b506cc4c6ce
 odds_API_fetch|function|38cbd9dcc27c272c
@@ -52,46 +62,37 @@ update_player_key|function|9213c79231e663c8
 clean_UpcomingRound_lineup|function|a1f991af4c308b2d
 build_player_features|function|2cf59625930bfcb9
 build_TeamLevel_features|function|9f48f695a600dc13
-historical_odds_log|stem|3eb5c954cc90d6ec|af136e84821fb6a2|2c530c1562a7fbd1|-580893075||t20614.0689746454s|s2562b|2562|rds|local|vector|||0.3||
-odds_raw|stem|edce89c06061eade|1d64244510d9406e|3f4adf6adc444d1e|828973550||t20614.0689827947s|s881b|881|rds|local|vector|||0.65||
-params|stem|1162a82e15fad38e|09319c0cea65273e|8cc3d22b57832ae4|-675321759||t20614.0689833909s|s392b|392|rds|local|vector|||0||
-historical_team|stem|1c0c705785a1dddd|11a6ef93e01aae7b|2c530c1562a7fbd1|-1294875921||t20614.0689852285s|s38348b|38348|rds|local|vector|||0.13||
-historical_ladder|stem|bea9782fcfd28929|5e09b9b953a2b66c|2c530c1562a7fbd1|-575686357||t20614.0689870367s|s12281b|12281|rds|local|vector|||0.11||
-historical_player|stem|80c6f33cd2b46304|49ab8e53848a25b6|2c530c1562a7fbd1|-1170547472||t20614.0689894659s|s74163b|74163|rds|local|vector|||0.17||
-historical_predictions_log|stem|c21c269ff50246b9|09cde0b892375c7b|2c530c1562a7fbd1|1772957765||t20614.0689909691s|s1665b|1665|rds|local|vector|||0.08||
-historical_bets_log|stem|caa44b30d477a04a|cc63171419388784|2c530c1562a7fbd1|-433377087||t20614.0689925583s|s1200b|1200|rds|local|vector|||0.1||
-player_key|stem|50fba70ee1425d41|98412285507e7a55|2c530c1562a7fbd1|-2146967023||t20614.0689939909s|s14017b|14017|rds|local|vector|||0.09||
-UpcomingRound_fixtures_raw|stem|e8ba2dae751bc87e|d8657d311c3a168e|6da983e024c19051|-848830476||t20614.0690029493s|s450b|450|rds|local|vector|||0.73||
-UpcomingRound_lineups_raw|stem|255a9980f193105c|387e73df706f472b|627583873139d6ba|869105223||t20614.0690251882s|s2752b|2752|rds|local|vector|||1.9||
-PreviousRound_ladder_raw|stem|e520d61c6ecf96a0|90522dfd1c59a8f2|c906821c211cb1fe|-296105962||t20614.0690270228s|s625b|625|rds|local|vector|||0.14||
-model_metadata|stem|1d50a9b021229646|b8250e3abe822be2|3125d074915a3fe6|-166344504||t20614.0690276208s|s393b|393|rds|local|vector|||0.02||
-PreviousRound_player_raw|stem|56e3a042bf80f542|7b2306dcba21534c|00f3cfd039392321|-519817346||t20614.0690453717s|s16587b|16587|rds|local|vector|||1.52||
-UpcomingRound_ladder_raw|stem|e520d61c6ecf96a0|5d8e0c07d62060a2|eb221048bdda9ef1|1558292100||t20614.0690476823s|s625b|625|rds|local|vector|||0.15||
-PreviousRound_team_raw|stem|184b67c42b64b694|a0427eb095f62601|5aa5201324ec2f11|218076201||t20614.0690647715s|s2521b|2521|rds|local|vector|||1.47||
-UpcomingRound_fixtures_clean_long|stem|21eb4a2d461c9da7|18a0c47b1217cb53|c0e6823c83ae4342|905691630||t20614.0690654974s|s376b|376|rds|local|vector|||0.05||
-player_key_updated|stem|f28f98a8a95fde92|015513a4a63eb11c|274fbf9fbe8dc097|-1703690522||t20614.0690686104s|s13870b|13870|rds|local|vector|||0.26||
-PreviousRound_ladder_clean|stem|f30ccf5c24d964ea|bfc498414ba97d78|45990a865540bf7e|-1801339756||t20614.0690696641s|s525b|525|rds|local|vector|||0.06||
-PreviousRound_player_clean|stem|1b208a900205b15c|766b67bdee4aa44e|a448d3e9ad3a50e9|88918321||t20614.0690703682s|s11418b|11418|rds|local|vector|||0.03||
-UpcomingRound_ladder_clean|stem|2217473913650650|24ca9f20ea3cf74d|e13c819dced69947|1664487066||t20614.0690707809s|s525b|525|rds|local|vector|||0.01||
-PreviousRound_team_clean|stem|e95aed4278cf0a86|65f6759b7e572ae7|4f8ee022c737f147|-1765380774||t20614.0690717093s|s963b|963|rds|local|vector|||0.05||
-UpcomingRound_lineup_clean|stem|ec05b37f7c8ee272|8d948f5347469366|562d7861291b5dcb|-45739504||t20614.0690734391s|s3405b|3405|rds|local|vector|||0.14||
-player_key_file|stem|d7cd461e01c27988|5171dd50fd93d675|974bebfb199f0926|1574312891|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Player Key.csv|t20614.0690757667s|s24985b|24985|file|local|vector|||0.17||
-historical_ladder_updated|stem|af4653d3e774b18f|6bd3eec5342b75a2|0861911b511ac6d6|-425921745||t20614.0690759531s|s12102b|12102|rds|local|vector|||0||
-historical_player_updated|stem|3956bf8015f74d82|50e6516d342b0be9|403d6d8a88857a10|-1351507125||t20614.0690765632s|s73935b|73935|rds|local|vector|||0||
-historical_team_updated|stem|aaf7d02c0d6f5ef2|7e92092621ece5bc|4e59768f6509d238|-1079491843||t20614.0690768217s|s38147b|38147|rds|local|vector|||0||
-historical_ladder_file|stem|28c3f7d6db1d9847|7b8304759ca9a2b0|4b4b9026d5e335c6|-2098160682|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Ladder Data.csv|t20614.0690801477s|s57146b|57146|file|local|vector|||0.26||
-historical_player_file|stem|4abaf04df1a912de|e3dc9e80fd1236aa|312a35ca7df9d845|-398459857|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Player Data.csv|t20614.0690846519s|s377033b|377033|file|local|vector|||0.37||
-PlayerLevel_features|stem|8f320bf4f1045965|2f0261aafd9da554|a48d31e8f1540edd|-655350904||t20614.0690991331s|s144360b|144360|rds|local|vector|||1.23||
-historical_team_file|stem|1634cd771d94afb7|244a80af71c9025d|12c32112aec83bf4|-1863040160|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/01_Raw/Team Data.csv|t20614.0691028257s|s182724b|182724|file|local|vector|||0.28||
-TeamLevel_features|stem|3c2244e5289bfa8a|c3792cc6d4517b9c|6002478f94cdbdee|1047129463||t20614.0691063016s|s183581b|183581|rds|local|vector|||0.28||
-features_data|stem|b916f43a80bf91ba|d8dde20e09eb2c12|989735a8b2ec03e1|1293667363||t20614.0691075956s|s502138b|502138|rds|local|vector|||0.08||
-upcoming_predictions|stem|deac26d8e3e1ef90|ad2b57e66c950ddb|829b0304c7485593|-865419870||t20614.0691290125s|s428b|428|rds|local|vector|||1.83|Passed invalid argument 'info' - entries on it should be passed as direct arguments. This warning will become an error in a future version.. Passed invalid function arguments: eval_metric, nthread. These should be passed as a list to argument 'params'. Conversion from argument to 'params' entry will be done automatically, but this behavior will become an error in a future version.. Parameter 'watchlist' has been renamed to 'evals'. This warning will become an error in a future version.. Argument 'objective' is only for custom objectives. For built-in objectives, pass the objective under 'params'. This warning will become an error in a future version.|
-features_data_file|stem|60c8c1f28870e697|0602f27d3cb7e7b9|c1a3668273c341a4|-1834435033|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/02_Features/feature_engineered_df.csv|t20614.0691311366s|s1334925b|1334925|file|local|vector|||0.16||
-new_odds_log_data|stem|9c0f22591ad49b10|5d41f5d72a8a9d06|69c7ee08e1ce1b7a|-906617635||t20614.0691313217s|s899b|899|rds|local|vector|||0||
-new_bets_log_data|stem|386f28b6f3d3cb52|bdaea03b87f5111c|6cc22501dc98d597|-1466716620||t20614.0691318608s|s484b|484|rds|local|vector|||0.02||
-predictions_log_updated|stem|f8989a8b25156ef8|f68efef8e72caa7a|4ce3cd90087be0f1|-1679240412||t20614.0691320564s|s1581b|1581|rds|local|vector|||0.02||
-odds_log_updated|stem|ede84e3190fec75f|f3934b58d7f14561|4d8a0bb4b3d0cb2b|689982581||t20614.0691322375s|s2745b|2745|rds|local|vector|||0||
-bets_log_updated|stem|41c86fdffb6e6b4a|3d421a815163b814|99330685b468eee1|243581517||t20614.0691324975s|s1145b|1145|rds|local|vector|||0||
-predictions_log_updated_file|stem|e380422c80b7ef57|e0f6ddd873cc810b|3952231fad24eae5|1362145050|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/03_Outputs/prediction_log.csv|t20614.0691328615s|s5268b|5268|file|local|vector|||0.01||
-odds_log_updated_file|stem|c4705bdb947aedbd|e581f0aafa36429f|50e2cba2164e3452|980485502|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/03_Outputs/odds_log.csv|t20614.0691338717s|s32611b|32611|file|local|vector|||0.07||
-bets_log_updated_file|stem|2c267bc93222208b|c49b045c0e163b3b|6a9a249ede48a0d2|-1560315828|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/03_Outputs/bets_log.csv|t20614.0691342003s|s2504b|2504|file|local|vector|||0||
+historical_odds_log|stem|56e581a01e18a3a6|af136e84821fb6a2|2c530c1562a7fbd1|-580893075||t20620.4789289256s|s2917b|2917|rds|local|vector|||0.11||
+odds_raw|stem|cdc0f608c8c0b343|1d64244510d9406e|3f4adf6adc444d1e|828973550||t20620.4789466153s|s1007b|1007|rds|local|vector|||1.52||
+historical_team|stem|fbeca65dae849788|11a6ef93e01aae7b|2c530c1562a7fbd1|-1294875921||t20620.4789493577s|s38560b|38560|rds|local|vector|||0.1||
+historical_ladder|stem|8b259801d925630b|5e09b9b953a2b66c|2c530c1562a7fbd1|-575686357||t20620.4789530548s|s12434b|12434|rds|local|vector|||0.31||
+historical_player|stem|288d3eba2cb47bc8|49ab8e53848a25b6|2c530c1562a7fbd1|-1170547472||t20620.4789551178s|s79509b|79509|rds|local|vector|||0.14||
+historical_predictions_log|stem|251ddebc642d062a|09cde0b892375c7b|2c530c1562a7fbd1|1772957765||t20620.4789561303s|s1759b|1759|rds|local|vector|||0.06||
+historical_bets_log|stem|38fe9bc843cb3174|cc63171419388784|2c530c1562a7fbd1|-433377087||t20620.4789569116s|s1313b|1313|rds|local|vector|||0.06||
+player_key|stem|766003258b137a3e|98412285507e7a55|2c530c1562a7fbd1|-2146967023||t20620.4789578459s|s14032b|14032|rds|local|vector|||0.06||
+UpcomingRound_fixtures_raw|stem|cd3d97e60a726f71|d8657d311c3a168e|0a1b399175bbe349|-848830476||t20620.4789649396s|s579b|579|rds|local|vector|||0.6||
+UpcomingRound_lineups_raw|stem|cb2d033766739e31|387e73df706f472b|5654e6f70c734829|869105223||t20620.4789886561s|s3707b|3707|rds|local|vector|||2.04||
+PreviousRound_ladder_raw|stem|f709fb8e15bdb5d9|90522dfd1c59a8f2|652d9f85a6c3d82b|-296105962||t20620.4789905732s|s629b|629|rds|local|vector|||0.14||
+PreviousRound_player_raw|stem|f57f1117e8dfc8ec|7b2306dcba21534c|2a42c1985a7c7973|-519817346||t20620.4790035728s|s10947b|10947|rds|local|vector|||1.12||
+UpcomingRound_ladder_raw|stem|f709fb8e15bdb5d9|5d8e0c07d62060a2|42678a5f6e641085|1558292100||t20620.4790054296s|s629b|629|rds|local|vector|||0.13||
+PreviousRound_team_raw|stem|593bfbfac66bc7eb|a0427eb095f62601|fabf4e9abfbf22f5|218076201||t20620.4790199915s|s1881b|1881|rds|local|vector|||1.24||
+player_key_updated|stem|fefd9a02d9e5b827|015513a4a63eb11c|12acd69ae0579c51|-1703690522||t20620.4790220739s|s13884b|13884|rds|local|vector|||0.18||
+PreviousRound_ladder_clean|stem|70bc3bb37502a02f|bfc498414ba97d78|baef1a3152179458|-1801339756||t20620.4790226021s|s531b|531|rds|local|vector|||0.03||
+PreviousRound_player_clean|stem|5574c830c24a1761|766b67bdee4aa44e|76123c686c78cf45|88918321||t20620.4790231827s|s7569b|7569|rds|local|vector|||0.03||
+UpcomingRound_ladder_clean|stem|e7fabe9c19e78f31|24ca9f20ea3cf74d|35bfc1251add340f|1664487066||t20620.479023493s|s532b|532|rds|local|vector|||0.01||
+PreviousRound_team_clean|stem|612bfac7422ff750|65f6759b7e572ae7|d7f54296637da239|-1765380774||t20620.4790241289s|s729b|729|rds|local|vector|||0.03||
+UpcomingRound_lineup_clean|stem|b8d25acfb4aa9aae|8d948f5347469366|cea8654304e91401|-45739504||t20620.4790258599s|s4495b|4495|rds|local|vector|||0.14||
+historical_ladder_updated|stem|618f75cbb2248fed|6bd3eec5342b75a2|04143dd8f1aa6057|-425921745||t20620.4790261799s|s12257b|12257|rds|local|vector|||0||
+historical_player_updated|stem|5385bc47b09a651e|50e6516d342b0be9|856290204fa1d402|-1351507125||t20620.4790265567s|s79274b|79274|rds|local|vector|||0||
+historical_team_updated|stem|27f5dacfdc6cd372|7e92092621ece5bc|66ec22b26df5f985|-1079491843||t20620.4790268552s|s38363b|38363|rds|local|vector|||0||
+PlayerLevel_features|stem|c4468ab2341fc38f|2f0261aafd9da554|d9315d483fdc3cd3|-655350904||t20620.4790386892s|s146307b|146307|rds|local|vector|||0.99||
+upcoming_predictions|stem|5ff8b661fc2e78b4|ad2b57e66c950ddb|4fae38ea50471541|-865419870||t20620.4790579338s|s489b|489|rds|local|vector|||1.65|Passed invalid argument 'info' - entries on it should be passed as direct arguments. This warning will become an error in a future version.. Passed invalid function arguments: eval_metric, nthread. These should be passed as a list to argument 'params'. Conversion from argument to 'params' entry will be done automatically, but this behavior will become an error in a future version.. Parameter 'watchlist' has been renamed to 'evals'. This warning will become an error in a future version.. Argument 'objective' is only for custom objectives. For built-in objectives, pass the objective under 'params'. This warning will become an error in a future version.|
+features_data_file|stem|8775f6460b7bb76c|0602f27d3cb7e7b9|b984b8a418cb0e1d|-1834435033|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/02_Features/feature_engineered_df.csv|t20620.4790598173s|s1348180b|1348180|file|local|vector|||0.12||
+new_odds_log_data|stem|5a3882a8e84550c4|5d41f5d72a8a9d06|2967559d0d898433|-906617635||t20620.47906024s|s1033b|1033|rds|local|vector|||0||
+new_bets_log_data|stem|08b93a0d79738a86|bdaea03b87f5111c|9fab0ff83f9f0c1e|-1466716620||t20620.4790608299s|s551b|551|rds|local|vector|||0.02||
+predictions_log_updated|stem|99476f7659c46c6f|f68efef8e72caa7a|30407054b6394e42|-1679240412||t20620.4790613592s|s1717b|1717|rds|local|vector|||0||
+odds_log_updated|stem|1633a70b4bd92af1|f3934b58d7f14561|d6bfa3e9391a8bf9|689982581||t20620.4790615274s|s3228b|3228|rds|local|vector|||0||
+bets_log_updated|stem|7b4a7f856d381a8f|3d421a815163b814|bbf8ece3872af7cb|243581517||t20620.4790617821s|s1272b|1272|rds|local|vector|||0||
+predictions_log_updated_file|stem|6ed1c5d142095731|e0f6ddd873cc810b|8ee5cbf7934d0197|1362145050|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/03_Outputs/prediction_log.csv|t20620.4790620932s|s5921b|5921|file|local|vector|||0.01||
+odds_log_updated_file|stem|d052a831fc97d213|e581f0aafa36429f|b1ba0569dbcbaa5f|980485502|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/03_Outputs/odds_log.csv|t20620.4790631052s|s39520b|39520|file|local|vector|||0.06||
+bets_log_updated_file|stem|3def2e04fe60ae08|c49b045c0e163b3b|878e2bcdcd683701|-1560315828|C:/Users/JackG/OneDrive/Documents/Projects/Modelling/nrl-model/Data/03_Outputs/bets_log.csv|t20620.4790634716s|s3030b|3030|file|local|vector|||0.01||

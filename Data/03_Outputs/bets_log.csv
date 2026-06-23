@@ -1,4 +1,11 @@
 commence_time,home_team,away_team,home_team_odds,away_team_odds,bookmaker,ev_bet,match_id
+2026-06-19T10:00:00Z,Knights,Dragons,1.25,4,sportsbet,Dragons,129991601
+2026-06-20T05:00:00Z,Tigers,Dolphins,3,1.39,betr_au,Tigers,129991602
+2026-06-20T07:30:00Z,Titans,Panthers,4.3,1.23,sportsbet,Titans,129991603
+2026-06-20T09:35:00Z,Bulldogs,Eagles,3.1,1.36,ladbrokes_au,Bulldogs,129991604
+2026-06-21T04:00:00Z,Warriors,Cowboys,1.37,3.45,betfair_ex_au,Cowboys,129991605
+2026-06-21T06:05:00Z,Storm,Raiders,1.4,3.25,betfair_ex_au,Raiders,129991606
+2026-06-21T08:15:00Z,Roosters,Sharks,1.54,2.66,betfair_ex_au,Sharks,129991607
 2026-06-11T09:50:00Z,Rabbitohs,Broncos,1.46,2.72,betright,Broncos,129991501
 2026-06-12T10:00:00Z,Dolphins,Roosters,1.47,2.7,betr_au,Roosters,129991502
 2026-06-13T07:35:00Z,Warriors,Sharks,1.32,3.4,neds,Sharks,129991503
