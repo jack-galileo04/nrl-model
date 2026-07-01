@@ -1,0 +1,91 @@
+---
+title: "pipeline_nrlR_v4"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+r_files <- list.files(
+  path = here::here("R"),
+  pattern = "\\.R$",
+  full.names = TRUE
+)
+
+invisible(lapply(r_files, source))
+```
+
+```{r}
+params <- read_params()
+```
+
+## Load Historical Data
+
+```{r}
+historical_ladder_raw <- read_csv(here("Data/00_Raw/raw_ladder.csv"))
+historical_player_raw <- read_csv(here("Data/00_Raw/raw_player.csv"))
+historical_team_raw <- read_csv(here("Data/00_Raw/raw_team.csv"))
+player_key_raw <- read_csv(here("Data/00_Raw/raw_player_key.csv"))
+
+historical_ladder_clean <- read_csv(here("Data/01_Clean/Ladder Data.csv"))
+historical_player_clean <- read_csv(here("Data/01_Clean/Player Data.csv"))
+historical_team_clean <- read_csv(here("Data/01_Clean/Team Data.csv"))
+player_key_clean <- read_csv(here("Data/01_Clean/Player Key.csv"))
+```
+
+## Fetch Previous Round
+
+## Fetch Odds
+
+```{r}
+odds_raw <- odds_API_fetch()
+```
+
+## Fetching Upcoming Data
+
+## Cleaning Historical Data
+
+## Feature Engineering
+
+```{r}
+TeamContext_features <- build_TeamContext_features(historical_ladder_clean, historical_ladder_clean, UpcomingRound_fixtures_clean_long)
+
+elo_input <- build_elo_input(TeamContext_features)
+
+elo_features <- build_elo_features(elo_input, params)
+
+TeamLevel_features <- combine_TeamLevel_features(TeamContext_features, elo_features, params)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

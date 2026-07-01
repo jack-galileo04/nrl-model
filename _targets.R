@@ -18,18 +18,19 @@ tar_option_set(
 list(
   
   # get exogenous parameters
-  tar_target(params, read_params()),
+  tar_target(params, read_params(),
+             cue = tar_cue(mode = "always")),
   
   # add database connection later
   
   # load historical data
-  tar_target(historical_ladder, read_csv(here("Data/01_Raw/Ladder Data.csv")),
+  tar_target(historical_ladder, read_csv(here("Data/01_Clean/Ladder Data.csv")),
              cue = tar_cue(mode = "always")),
-  tar_target(historical_player, read_csv(here("Data/01_Raw/Player Data.csv")),
+  tar_target(historical_player, read_csv(here("Data/01_Clean/Player Data.csv")),
              cue = tar_cue(mode = "always")),
-  tar_target(historical_team, read_csv(here("Data/01_Raw/Team Data.csv")),
+  tar_target(historical_team, read_csv(here("Data/01_Clean/Team Data.csv")),
              cue = tar_cue(mode = "always")),
-  tar_target(player_key, read_csv(here("Data/01_Raw/Player Key.csv")),
+  tar_target(player_key, read_csv(here("Data/01_Clean/Player Key.csv")),
              cue = tar_cue(mode = "always")),
   
   # fetch previous round data
@@ -75,7 +76,7 @@ list(
   # export updated historical data
   tar_target(historical_ladder_file, 
              {
-               path <- here("Data/01_Raw/Ladder Data.csv")
+               path <- here("Data/01_Clean/Ladder Data.csv")
                write_csv(historical_ladder_updated, path)
                path
              }, 
@@ -83,7 +84,7 @@ list(
   
   tar_target(historical_player_file, 
              {
-               path <- here("Data/01_Raw/Player Data.csv")
+               path <- here("Data/01_Clean/Player Data.csv")
                write_csv(historical_player_updated, path)
                path
              },
@@ -91,7 +92,7 @@ list(
              format = "file"),
   tar_target(historical_team_file, 
              {
-               path <- here("Data/01_Raw/Team Data.csv")
+               path <- here("Data/01_Clean/Team Data.csv")
                write_csv(historical_team_updated, path)
                path
              },
@@ -99,7 +100,7 @@ list(
              format = "file"),
   tar_target(player_key_file, 
              {
-               path <- here("Data/01_Raw/Player Key.csv")
+               path <- here("Data/01_Clean/Player Key.csv")
                write_csv(player_key_updated, path)
                path
              },

@@ -9,8 +9,9 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(here)
 library(readxl)
-
 library(nrlR)
+library(odbc)
+library(DBI)
 
 comps <- fetch_cd_comps() |> 
   filter(str_detect(name, "NRL Finals") | str_detect(name, "NRL Premiership")) |> 
@@ -18,6 +19,35 @@ comps <- fetch_cd_comps() |>
 
 comp_ids <- comps$id
 
+con <- odbc::dbConnect(
+  odbc::odbc(), 
+  Driver = "SQL Server",
+  Server = Sys.getenv("DB_SERVER"),
+  Database = Sys.getenv("DB_NAME"),
+  Trusted_Connection = "Yes"
+)
+```
+
+```{r}
+ladder_db <- DBI::dbReadTable(
+  con, 
+  DBI::Id(schema = "clean", table = "Ladder Data")
+)
+
+team_db <- DBI::dbReadTable(
+  con, 
+  DBI::Id(schema = "clean", table = "Team Data")
+)
+
+player_db <- DBI::dbReadTable(
+  con, 
+  DBI::Id(schema = "clean", table = "Player Data")
+)
+
+player_key_db <- DBI::dbReadTable(
+  con, 
+  DBI::Id(schema = "clean", table = "Player Key")
+)
 ```
 
 
@@ -27,7 +57,7 @@ comp_ids <- comps$id
 results <- fetch_results_rugbyproject(seasons = 2016:2026, league = "nrl") |> # Removes upcoming fixtures
   filter(!is.na(home_score))
 
-results |> distinct(round)
+results |> head()
 ```
 
 ```{r}
@@ -53,9 +83,9 @@ for(i in 2016:2026){
 
 ladder_df <- ladder_df |> 
   drop_na() |> 
-  janitor::clean_names()
-
-write.csv(ladder_df, here("Data/Raw/Ladder Data.csv"))
+  janitor::clean_names() |> 
+  filter(!(season == params$season & round > params$round )) |> 
+  distinct(team, ladder_points, points_for, points_against, points_diff, season, ladder_position, .keep_all = TRUE)
 ```
 
 ```{r}
@@ -92,8 +122,23 @@ for(i in 1:length(comp_ids)){
 player_df <- player_df |> 
   drop_na(playerId) |> 
   janitor::clean_names()
+```
 
-write.csv(player_df, here("Data/Raw/Player Data.csv"))
+```{r}
+player_df |> 
+  count(match_id, team_name) |> 
+  arrange(match_id,team_name) |> 
+  left_join(
+    player_db |> count(match_id, team_name) |> arrange(match_id, team_name),
+    by = c("match_id", "team_name")
+  )
+
+player_db |> count(match_id, team_name, sort = TRUE)
+
+player_df |> 
+  count(match_id, team_name) |> 
+  arrange(match_id,team_name) |> 
+  arrange(desc(n))
 ```
 
 
@@ -124,9 +169,16 @@ team_df <- team_df |>
   drop_na(team_name) |> 
   janitor::clean_names() |> 
   group_by(match_id, team_name) |> 
-  slice_head(n = 1)
+  slice_head(n = 1) |> 
+  ungroup()
+```
 
-write.csv(team_df, here("Data/Raw/Team Data.csv"))
+```{r}
+team_db |> count(match_id, sort = TRUE)
+  
+team_df |> count(match_id, sort = TRUE)
+
+team_db |> distinct(match_id)
 ```
 
 ```{r}
@@ -136,9 +188,15 @@ player_key <- player_df |>
   group_by(player_id) |> 
   slice_head(n = 1) |> 
   ungroup()
-
-write.csv(player_key, here("Data/Raw/Player Key.csv"))
 ```
+
+```{r}
+write_csv(player_key, here::here("Data/00_Raw/raw_player_key.csv"))
+write_csv(player_df, here::here("Data/00_Raw/raw_player.csv"))
+write_csv(team_df, here::here("Data/00_Raw/raw_team.csv"))
+write_csv(ladder_df, here::here("Data/00_Raw/raw_ladder.csv"))
+```
+
 
 ```{r}
 knitr::purl("nrlR_original_fetch.Rmd", output = "nrlR_original_fetch.R")

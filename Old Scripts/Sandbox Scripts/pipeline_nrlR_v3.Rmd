@@ -51,18 +51,6 @@ read_params <- function(){
 
 params <- read_params()
 
-# lineup url for scraping
-build_lineup_url <- function(params) {
-  
-  tuesday <- gsub("-", "/", floor_date(Sys.Date(), "week", week_start = params$week_start))
-  
-  if (params$special_round != ""){
-    paste0("https://www.nrl.com/news/", tuesday, "/", params$special_round, "/")
-  } else {
-    paste0("https://www.nrl.com/news/", tuesday, "/nrl-team-lists-round-", params$round, "/")
-  }
-}
-
 # upcoming lineups
 fetch_upcoming_lineups <- function(lineup_url) {
 

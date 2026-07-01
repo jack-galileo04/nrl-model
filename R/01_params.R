@@ -18,7 +18,7 @@ read_params <- function(){
     
     special_round = "", # "nrl-team-lists-magic-round"
     
-    position_minutes_weights = tribble(
+    position_minutes_weights = tibble::tribble(
       ~position, ~w,
       "Fullback", 1,
       "Wing", 1,
@@ -35,4 +35,5 @@ read_params <- function(){
     comp = 12999
   )
 }
+
 

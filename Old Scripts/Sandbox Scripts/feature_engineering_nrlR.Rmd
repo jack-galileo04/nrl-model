@@ -6,80 +6,24 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-library(nrlR)
-library(tidyverse)
-library(here)
-library(readxl)
-library(elo)
+r_files <- list.files(
+  path = here::here("R"),
+  pattern = "\\.R$",
+  full.names = TRUE
+)
 
-read_params <- function(){
-  
-  list(
-    season = 2026,
-    round_number = 13,
-    week_start = 2,
-    
-    lambda = 0.94, # Degree of recency bias in rolling form variables
-    elo_k = 23, # Degree of recency bias in elo model
-    
-    special_round = "", # "nrl-team-lists-magic-round"
-    
-    position_minutes_weights = tribble(
-      ~position, ~w,
-      "Fullback", 1,
-      "Wing", 1,
-      "Centre", 1,
-      "Five-Eighth", 1,
-      "Halfback", 1,
-      "Prop", 0.6,
-      "Hooker", 0.8,
-      "Second Row", 0.75,
-      "Lock", 0.75,
-      "Interchange", 0.4
-    ), # weighting stats by minutes played (approximate)
-    
-    comp = 12999
-  )
-}
+invisible(lapply(r_files, source))
+```
 
+```{r}
 params <- read_params()
 
-historical_ladder_updated <- read_csv(here("Data/01_Raw/Ladder Data.csv"))
-historical_team_updated <- read_csv(here("Data/01_Raw/Team Data.csv"))
-historical_player_updated <- read_csv(here("Data/01_Raw/Player Data.csv"))
+historical_ladder_updated <- read_csv(here("Data/01_Clean/Ladder Data.csv"))
+historical_team_updated <- read_csv(here("Data/01_Clean/Team Data.csv"))
+historical_player_updated <- read_csv(here("Data/01_Clean/Player Data.csv"))
 ```
 
 # Feature Engineering
-
-```{r feature calc functions}
-compute_elo <- function(df, k) {
-  
-  elo.run(
-    result ~ team_home + team_away,
-    data = df,
-    k = k
-  ) |> 
-    as_tibble() |> 
-  bind_cols(df |> select(utc_start)) |> # select date from elo input
-  arrange(desc(utc_start)) |> 
-  select(team_home = team.A, team_away = team.B, elo_home = elo.A, elo_away = elo.B, utc_start) |> 
-  pivot_longer(
-    cols = team_home:elo_away,
-    names_to = c(".value", "team_location"),
-    names_sep = "_"
-  ) |> 
-  arrange(utc_start) |> 
-  group_by(team) |> 
-  mutate(elo = lag(elo),
-         elo = replace_na(elo, 1500)) |> 
-    ungroup()
-}
-
-# input vector x, and degree of weighting for rolling forms lambda. Get lagged rolling forms output.
-rolling_lambda <- function(x, lambda) {
-  lag(purrr::accumulate(x, ~lambda*.x + (1-lambda)*.y), 1)
-}
-```
 
 ## Team Level Features
 
@@ -90,7 +34,7 @@ TeamContext_features <- historical_team_updated |>
   mutate(
     days_rest = as.double(utc_start - lag(utc_start)),
     days_rest = ifelse(days_rest > 50, NA, days_rest),
-    team = str_extract(team_name, "\\w+$"),
+    team_name = str_extract(team_name, "\\w+$"),
     season_stage = factor(case_when(
       round < 12 ~ "Early",
       round >= 12 & round <= 19 ~ "Mid",
@@ -100,10 +44,10 @@ TeamContext_features <- historical_team_updated |>
     ) |> 
   ungroup() |> 
   left_join(
-    historical_ladder_updated, 
-    by = c("team", "season", "round")
+    historical_ladder_updated |> rename(team_name = team), 
+    by = c("team_name", "season", "round")
     ) |> 
-  select(-team, -comp) |> 
+  select(-comp) |> 
   rename(
     ladder_points_for = points_for, 
     ladder_points_against = points_against, 
@@ -125,8 +69,8 @@ elo_input <- TeamContext_features |>
       score_home == score_away ~ 0.5,
       T ~ 0
     )) |> 
+    select(match_id, utc_start, team_home, team_away, score_home, score_away, everything()) |>
     arrange(utc_start)
-
 ```
 
 ```{r}
@@ -148,19 +92,6 @@ elo_features <- elo_input |>
     left_join(elo_model) |> 
     left_join(recent_elo_model) |> 
     left_join(long_elo_model)
-
-elo_features %>%
-  arrange(desc(utc_start))
-
-elo_features |> 
-  mutate(month = floor_date(utc_start, unit = "month")) |> 
-  group_by(month) |> 
-  summarise(elo = mean(elo), shortelo = mean(shortelo), longelo = mean(longelo)) |> 
-  ggplot(aes(month)) +
-  geom_line(aes(y = elo, colour = "red")) +
-  geom_line(aes(y = shortelo, colour = "green")) +
-  geom_line(aes(y = longelo, colour = "blue")) +
-  scale_colour_discrete(labels = c("elo", "shortelo", "longelo"))
 ```
 
 ```{r}
@@ -183,9 +114,6 @@ TeamLevel_features <- TeamContext_features |>
       ~ lag(.x, n = 1)
     )) |> 
     ungroup()
-
-TeamLevel_features %>%
-  arrange(desc(utc_start))
 ```
 
 ## Player Level Features
@@ -271,7 +199,9 @@ PlayerLevel_features <-  player_statistics |>
       team_location = first(team_location),
       across(goals_per_kick:ineff_per_t, ~ mean(.x, na.rm = TRUE)) # Averaging statistics across team, may change to weighted averages later
       ) |> 
-    ungroup()
+    ungroup() |> 
+    mutate(team_name = str_extract(team_name, "\\w+$")) |> 
+  mutate(across(everything(), ~ifelse(.x == Inf, NA, .x)))
 ```
 
 ## Combine Features
@@ -294,8 +224,9 @@ features_data <-  PlayerLevel_features |>
       result = factor(case_when(
         result_home > result_away ~ "H",
         result_away > result_home ~ "A",
-        T ~ "A"))
+        T ~ "NA"))
         ) |> # making target variable (binary classification)
+    drop_na(result) |> # removes draws (70 instances, will think of something)
     rename(
       date = utc_start, # clearer name
       home_team = team_name_home, 
@@ -322,17 +253,11 @@ features_data <-  PlayerLevel_features |>
       where(is.numeric),
       ~ ifelse(is.finite(.), ., NA_real_)
       )) # figure out cause of this, only 1 or 2 in a few columns
-
-features_data %>%
-  select(home_team, away_team, shortelo_home, shortelo_away, elo_home, elo_away, everything()) %>%
-  arrange(desc(date))
 ```
 
 ```{r}
 knitr::purl("feature_engineering_nrlR.Rmd", output = "feature_engineering_nrlR.R")
 ```
-
-
 
 
 

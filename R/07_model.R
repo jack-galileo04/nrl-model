@@ -21,14 +21,14 @@ define_XgBoost_model_specification <- function(model_parameters) {
 define_XgBoost_Data_PreprocessingRecipe <- function(train_data) {
   
   recipe(result ~ ., data = train_data) |> 
-    update_role(match_id, new_role = "ID") |> 
     step_rm(
+      match_id,
       home_result, away_result, # target variable proxies
       home_team, away_team, # Noisy, 17 factors
       date, round) |> # Using season stage for this
     step_zv(all_predictors()) |> # Remove predictors that are constant "no predictive value"
     step_novel(all_nominal_predictors()) |> # assigns unseen factor levels "new"
-    step_dummy(all_nominal_predictors()) # dummies factor variables
+    step_dummy(all_nominal_predictors(), sparse = "no") # dummies factor variables
   
 }
 
@@ -36,22 +36,41 @@ fit_model_and_make_predictions <- function(features_data) {
   
   cutoff <- floor_date(Sys.Date(), unit = "weeks", week_start = 2)
   
-  train_data <- features_data |>  filter(date < cutoff)
-  pred_data  <- features_data |>  filter(date >= cutoff)
+  message("Date class:", class(features_data$date))
   
-  model_parameters <- readRDS(here("Outputs/model_parameters.rds"))
+  model_data <- features_data
+  
+  message("Number of target NAs: ", sum(is.na(model_data$result)))
+  message("Range of dates: ")
+  print(range(features_data$date))
+  
+  train_data <- model_data |>  filter(date < cutoff) |> 
+    drop_na(result)
+  pred_data  <- model_data |>  filter(date >= cutoff)
+  
+  message("Number of Predictions: ", nrow(pred_data))
+  
+  model_parameters <- readRDS(here("Outputs/xgb_model_parameters.rds"))
   
   model_specification <- define_XgBoost_model_specification(model_parameters)
   
-  data_recipe <- define_XgBoost_Data_PreprocessingRecipe(train_data)
+  preprocessing_recipe <- define_XgBoost_Data_PreprocessingRecipe(train_data)
+  
+  prep <- prep(preprocessing_recipe)
+  message("Recipe prep successful")
+  
+  bake <- bake(prep, new_data = pred_data)
+  message("Recipe bake successful, rows: ", nrow(bake))
   
   modelling_workflow <- workflow() |> 
     add_model(model_specification) |> 
-    add_recipe(data_recipe)
+    add_recipe(preprocessing_recipe)
   
   set.seed(234)
   
   model_fit <- fit(modelling_workflow, data = train_data)
+  
+  message("Model fit was successful")
   
   model_fit |> 
     predict(new_data = pred_data, type = "prob") |> 

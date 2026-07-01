@@ -142,6 +142,10 @@ build_TeamLevel_features <- function(historical_team_updated, historical_ladder_
   
   TeamLevel_features <- combine_TeamLevel_features(TeamContext_features, elo_features, params)
   
+  message("build_TeamLevel_features:")
+  print(class(TeamLevel_features$utc_start))
+  
+  return(TeamLevel_features)
 }
 
 
@@ -234,7 +238,11 @@ combine_player_features <- function(player_statistics) {
       across(goals_per_kick:ineff_per_t, ~ mean(.x, na.rm = TRUE)) # Averaging statistics across team, may change to weighted averages later
     ) |> 
     ungroup() |> 
-    mutate(team_name = str_extract(team_name, "\\w+$"))
+    mutate(team_name = str_extract(team_name, "\\w+$")) |> 
+    mutate(across(
+      where(is.numeric),
+      ~ifelse(.x == Inf, NA, .x)
+      ))
   
 }
 
@@ -244,6 +252,11 @@ build_player_features <- function(historical_player_updated, UpcomingRound_lineu
   
   PlayerLevel_features <- combine_player_features(player_statistics)
   
+  message("build_player_features:")
+  print(class(PlayerLevel_features$utc_start))
+  
+  return(PlayerLevel_features)
+  
 }
 
 
@@ -251,7 +264,7 @@ build_player_features <- function(historical_player_updated, UpcomingRound_lineu
 
 build_features_data <- function(PlayerLevel_features, TeamLevel_features) {
   
-  PlayerLevel_features |> 
+PlayerLevel_features |> 
     left_join(
       TeamLevel_features |> 
         select(-utc_start, -team_location, -competition_id, -round, -season), 
@@ -267,8 +280,9 @@ build_features_data <- function(PlayerLevel_features, TeamLevel_features) {
       result = factor(case_when(
         result_home > result_away ~ "H",
         result_away > result_home ~ "A",
-        T ~ "A"))
+        T ~ NA))
     ) |> # making target variable (binary classification)
+    select(result, everything()) |> # making sure not included in across functions
     rename(date = utc_start) |> # clearer name
     rename(
       home_team = team_name_home, 
@@ -297,10 +311,5 @@ build_features_data <- function(PlayerLevel_features, TeamLevel_features) {
     )) # figure out cause of this, only 1 or 2 in a few columns
   
 }
-
-
-
-
-
 
 

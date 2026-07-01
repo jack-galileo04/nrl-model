@@ -18,6 +18,7 @@ fetch_PreviousRound_player_raw <- function(params) {
     source = "championdata", 
     comp = params$comp
   )
+
   
 }
 
@@ -122,7 +123,7 @@ build_lineup_url <- function(params) {
   if (params$special_round != ""){
     paste0("https://www.nrl.com/news/", tuesday, "/", params$special_round, "/")
   } else {
-    paste0("https://www.nrl.com/news/", tuesday, "/nrl-team-lists-round-", params$round, "/")
+    paste0("https://www.nrl.com/news/", tuesday, "/nrl-team-lists-round-", params$round_number, "/")
   }
 }
 
