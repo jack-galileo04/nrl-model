@@ -1,5 +1,9 @@
 #################### targets for pipeline ####################
 
+message("DB_SERVER = ", Sys.getenv("DB_SERVER"))
+message("DB_NAME = ", Sys.getenv("DB_NAME"))
+
+
 library(targets)
 
 tar_source() # loads modules in R/ folder
@@ -16,156 +20,148 @@ tar_option_set(
 # Pipeline (change the csv reading to file targets, and read into data frames donw stream)
 
 list(
-  
   # get exogenous parameters
   tar_target(params, read_params(),
              cue = tar_cue(mode = "always")),
   
-  # add database connection later
-  
-  # load historical data
-  tar_target(historical_ladder, read_csv(here("Data/01_Clean/Ladder Data.csv")),
-             cue = tar_cue(mode = "always")),
-  tar_target(historical_player, read_csv(here("Data/01_Clean/Player Data.csv")),
-             cue = tar_cue(mode = "always")),
-  tar_target(historical_team, read_csv(here("Data/01_Clean/Team Data.csv")),
-             cue = tar_cue(mode = "always")),
-  tar_target(player_key, read_csv(here("Data/01_Clean/Player Key.csv")),
-             cue = tar_cue(mode = "always")),
+  # read historical data
+  tar_target(historical_ladder_data, db_read(schema = "clean", table = "Ladder Data")),
+  tar_target(historical_player_data, db_read(schema = "clean", table = "Player Data")),
+  tar_target(historical_team_data, db_read(schema = "clean", table = "Team Data")),
+  tar_target(player_key, db_read(schema = "clean", table = "Player Key")),
   
   # fetch previous round data
-  tar_target(PreviousRound_ladder_raw, fetch_PreviousRound_ladder_raw(params),
-             cue = tar_cue(mode = "always")), # do not cache API forever
+  tar_target(PreviousRound_ladder, fetch_PreviousRound_ladder(params)),
+  tar_target(PreviousRound_player, fetch_PreviousRound_player(params)),
+  tar_target(PreviousRound_team, fetch_PreviousRound_team(params)),
   
-  tar_target(PreviousRound_player_raw, fetch_PreviousRound_player_raw(params),
-             cue = tar_cue(mode = "always")), # do not cache API forever
+  # update historical data
+  tar_target(updated_ladder, 
+             historical_ladder_data |> 
+               bind_rows(
+                 PreviousRound_ladder |> select(all_of(colnames(historical_ladder_data)))
+               ) |> 
+               distinct(team, season, round, .keep_all = TRUE) 
+  ),
+  tar_target(updated_player, 
+             historical_player_data |> 
+               bind_rows(
+                 PreviousRound_player |> select(all_of(colnames(historical_player_data)))
+               ) |> 
+               distinct(player_id, match_id, .keep_all = TRUE) 
+  ),
+  tar_target(updated_team, 
+             historical_team_data |> 
+               bind_rows(
+                 PreviousRound_team |> select(all_of(colnames(historical_team_data)))
+               ) |> 
+               distinct(team_name, match_id, .keep_all = TRUE)
+  ),
+  tar_target(player_key_updated, 
+             update_player_key(UpcomingRound_lineups_raw, player_key)
+             ),
   
-  tar_target(PreviousRound_team_raw, fetch_PreviousRound_team_raw(params),
-             cue = tar_cue(mode = "always")), # do not cache API forever
-  
-  # fetch upcoming odds
-  tar_target(odds_raw, odds_API_fetch(),
-             cue = tar_cue(mode = "always")),
+  # write historical data
+  tar_target(ladder_db, db_write(
+    schema = "clean", 
+    table = "Ladder Data", 
+    df = updated_ladder
+    )
+  ),
+    tar_target(player_db, db_write(
+    schema = "clean", 
+    table = "Player Data", 
+    df = updated_player
+    )
+  ),
+  tar_target(team_db, db_write(
+    schema = "clean", 
+    table = "Team Data", 
+    df = updated_team
+    )
+  ),
+  tar_target(player_key_db, db_write(
+    schema = "clean", 
+    table = "Player Key", 
+    df = player_key_updated
+    )
+  ),
   
   # fetch upcoming round data
   tar_target(UpcomingRound_ladder_raw, fetch_UpcomingRound_ladder_raw(params),
              cue = tar_cue(mode = "always")), # do not cache API forever
   
-  tar_target(UpcomingRound_lineups_raw, fetch_UpcomingRound_lineups_raw(params), #########################################################
+  tar_target(UpcomingRound_lineups_raw, fetch_UpcomingRound_lineups_raw(params), 
              cue = tar_cue(mode = "always")), # do not cache API forever
   
   tar_target(UpcomingRound_fixtures_raw, fetch_UpcomingRound_fixtures_raw(params), 
              cue = tar_cue(mode = "always")), # do not cache API forever
   
-  # clean previous round data
-  tar_target(PreviousRound_ladder_clean, clean_PreviousRound_ladder(PreviousRound_ladder_raw, historical_ladder, params)),
-  tar_target(PreviousRound_player_clean, clean_PreviousRound_player(PreviousRound_player_raw, historical_player, params)),
-  tar_target(PreviousRound_team_clean, clean_PreviousRound_team(PreviousRound_team_raw, historical_team, params)),
-  
   # clean upcoming round data
-  tar_target(UpcomingRound_ladder_clean, clean_UpcomingRound_ladder(UpcomingRound_ladder_raw, historical_ladder, params)),
-  tar_target(UpcomingRound_fixtures_clean_long, clean_UpcomingRound_fixtures(UpcomingRound_fixtures_raw, params)),
-  tar_target(UpcomingRound_lineup_clean, clean_UpcomingRound_lineup(UpcomingRound_lineups_raw, UpcomingRound_fixtures_clean_long, player_key)),
-  
-  # update historical data
-  tar_target(historical_ladder_updated, update_historical_ladder(historical_ladder, PreviousRound_ladder_clean)),
-  tar_target(historical_player_updated, update_historical_player(historical_player, PreviousRound_player_clean)),
-  tar_target(historical_team_updated, update_historical_team(historical_team, PreviousRound_team_clean)),
-  tar_target(player_key_updated, update_player_key(UpcomingRound_lineups_raw, player_key)),
-  
-  # export updated historical data
-  tar_target(historical_ladder_file, 
-             {
-               path <- here("Data/01_Clean/Ladder Data.csv")
-               write_csv(historical_ladder_updated, path)
-               path
-             }, 
-             format = "file"),
-  
-  tar_target(historical_player_file, 
-             {
-               path <- here("Data/01_Clean/Player Data.csv")
-               write_csv(historical_player_updated, path)
-               path
-             },
-             
-             format = "file"),
-  tar_target(historical_team_file, 
-             {
-               path <- here("Data/01_Clean/Team Data.csv")
-               write_csv(historical_team_updated, path)
-               path
-             },
-             
-             format = "file"),
-  tar_target(player_key_file, 
-             {
-               path <- here("Data/01_Clean/Player Key.csv")
-               write_csv(player_key_updated, path)
-               path
-             },
-             format = "file"),
+  tar_target(UpcomingRound_ladder_clean, 
+             clean_UpcomingRound_ladder(UpcomingRound_ladder_raw, params)
+  ),
+  tar_target(UpcomingRound_fixtures_clean_long, 
+             clean_UpcomingRound_fixtures(UpcomingRound_fixtures_raw, params)
+  ),
+  tar_target(UpcomingRound_lineup_clean, 
+             clean_UpcomingRound_lineups(UpcomingRound_lineups_raw, UpcomingRound_fixtures_clean_long, player_key)
+  ),
   
   # build features data
-  tar_target(TeamLevel_features, build_TeamLevel_features(historical_team_updated, historical_ladder_updated, UpcomingRound_fixtures_clean_long, UpcomingRound_ladder_clean, params)),
-  tar_target(PlayerLevel_features, build_player_features(historical_player_updated, UpcomingRound_lineup_clean, params)),
-  tar_target(features_data, build_features_data(PlayerLevel_features, TeamLevel_features)),
+  tar_target(model_data, build_model_data(
+    historical_player_updated = historical_player_data,
+    historical_team_updated = historical_team_data,
+    historical_ladder_updated = historical_ladder_data,
+    UpcomingRound_lineups = UpcomingRound_lineup_clean,
+    params = params
+  )),
   
   # update features data
-  tar_target(features_data_file,
-             {
-               path <- here("Data/02_Features/feature_engineered_df.csv")
-               write_csv(features_data, path)
-               path
-             },
-             format = "file"),
+  tar_target(feature_db, db_write(
+    schema = "feat", 
+    table = "Model Data", 
+    df = model_data
+      )
+    ),
   
-  # fit model and predict on upcoming round data
-  tar_target(upcoming_predictions, fit_model_and_make_predictions(features_data)),
+  # data split
+  tar_target(data_split, split_data(model_data)),
+  
+  # fit model
+  tar_target(model_fit, fit_model(data_split)),
+  
+  # make predictions
+  tar_target(upcoming_predictions, make_predictions(data_split, model_fit)),
   
   tar_target(model_metadata, 
-             build_XgBoost_model_metadata(params)),
+             build_model_metadata(params)),
   
-  # load output logs
-  tar_target(historical_predictions_log, read_csv(here("Data/03_Outputs/prediction_log.csv")),
-             cue = tar_cue(mode = "always")),
-  tar_target(historical_odds_log, read_csv(here("Data/03_Outputs/odds_log.csv")),
-             cue = tar_cue(mode = "always")),
-  tar_target(historical_bets_log, read_csv(here("Data/03_Outputs/bets_log.csv")),
+  # fetch upcoming odds
+  tar_target(odds_raw, odds_API_fetch(),
              cue = tar_cue(mode = "always")),
   
-  # Get new output log entries
-  tar_target(new_odds_log_data, pull_new_odds_log_data(upcoming_predictions, odds_raw, historical_odds_log)),
-  tar_target(new_bets_log_data, pull_new_bets_log_data(upcoming_predictions, odds_raw, historical_bets_log)),
+  # Build upcoming log outputs
+  tar_target(upcoming_odds_log_data, pull_new_odds_log_data(upcoming_predictions, odds_raw)),
+  tar_target(upcoming_bets_log_data, pull_new_bets_log_data(upcoming_predictions, odds_raw)),
   
   # update outputs
-  tar_target(predictions_log_updated, update_predictions_log(historical_predictions_log, upcoming_predictions)),
-  tar_target(odds_log_updated, update_odds_log(historical_odds_log, new_odds_log_data)),
-  tar_target(bets_log_updated, update_bets_log(historical_bets_log, new_bets_log_data)),
-  
-  # export updated outputs
-  tar_target(predictions_log_updated_file,
-             {
-               path <- here("Data/03_Outputs/prediction_log.csv")
-               write_csv(predictions_log_updated, path)
-               path
-             },
-             format = "file"),
-  
-  tar_target(odds_log_updated_file,
-             {
-               path <- here("Data/03_Outputs/odds_log.csv")
-               write_csv(odds_log_updated, path)
-               path
-             },
-             format = "file"),
-  
-  tar_target(bets_log_updated_file,
-             {
-               path <- here("Data/03_Outputs/bets_log.csv")
-               write_csv(bets_log_updated, path)
-               path
-             },
-             format = "file")
-  
+  tar_target(prediction_log_db, db_append(
+    schema = "out", 
+    table = "Prediction Log", 
+    df = upcoming_predictions
+    )
+  ),
+  tar_target(odds_log_db, db_append(
+    schema = "out", 
+    table = "Odds Log", 
+    df = upcoming_odds_log_data
+    )
+  ),
+  tar_target(bets_log_db, db_append(
+    schema = "out", 
+    table = "Betting Log", 
+    df = upcoming_bets_log_data
+    )
+  )
 )

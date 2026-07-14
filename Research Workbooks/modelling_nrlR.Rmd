@@ -1,0 +1,643 @@
+---
+title: "modelling_nrlR"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+r_files <- list.files(
+  path = here::here("R"),
+  pattern = "\\.R$",
+  full.names = TRUE
+)
+
+invisible(lapply(r_files, source))
+
+library(tidymodels)
+```
+
+```{r}
+define_glm_model_specification <- function(model_parameters) {
+  
+  elastic_spec <- logistic_reg(
+    penalty = model_parameters$penalty,
+    mixture = model_parameters$mixture
+    ) |> 
+    set_engine("glmnet") |> 
+    set_mode("classification")
+  
+  return(elastic_spec)
+}
+
+define_glm_data_PreprocessingRecipe <- function(train_data) {
+  
+  recipe(result ~ ., data = train_data) |> 
+    update_role(match_id, new_role = "ID") |> 
+    step_rm(
+      home_team, away_team,
+      date, round
+      ) |> 
+    step_novel(all_nominal_predictors()) |> 
+    step_dummy(all_nominal_predictors()) |> 
+    step_interact(terms = ~
+      elo_diff:outcome_mean_diff +
+        elo_diff:ladder_points_diff_diff +
+        tries_per_game_mean_diff:tries_conceded_per_game_mean_diff +
+        metres_per_run_mean_diff:metres_conceded_per_run_mean_diff +
+        lb_per_run_mean_diff:lb_conceded_per_run_mean_diff
+    ) |> 
+    step_zv(all_predictors()) |> 
+    step_normalize(all_numeric_predictors()) |> 
+    step_impute_median(all_numeric_predictors())
+}
+
+fit_model_and_make_predictions <- function(features_data) {
+  
+  cutoff <- floor_date(Sys.Date(), unit = "weeks", week_start = 2)
+  
+  message("Date class:", class(features_data$date))
+  
+  model_data <- features_data
+  
+  message("Number of target NAs: ")
+  print(sum(is.na(model_data$result)))
+  
+  message("Range of dates: ")
+  print(range(features_data$date))
+  
+  train_data <- model_data |>  filter(date < cutoff) |> 
+    drop_na(result)
+  
+  pred_data  <- model_data |>  filter(date >= cutoff)
+  
+  message("Number of Predictions: ")
+  print(nrow(pred_data))
+  
+  model_parameters <- readRDS(here("Outputs/elastic_model_parameters.rds"))
+  
+  model_specification <- define_glm_model_specification(model_parameters)
+  
+  preprocessing_recipe <- define_glm_data_PreprocessingRecipe(train_data)
+  
+  prep <- prep(preprocessing_recipe)
+  message("Recipe prep successful")
+  
+  bake <- bake(prep, new_data = pred_data)
+  message("Recipe bake successful, rows: ")
+  print(nrow(bake))
+  
+  modelling_workflow <- workflow() |> 
+    add_model(model_specification) |> 
+    add_recipe(preprocessing_recipe)
+  
+  set.seed(234)
+  
+  model_fit <- fit(modelling_workflow, data = train_data)
+  
+  message("Model fit was successful")
+  
+  model_fit |> 
+    predict(new_data = pred_data, type = "prob") |> 
+    bind_cols(pred_data) |> 
+    select(
+      date,
+      match_id,
+      home_team,
+      away_team,
+      home_prediction = .pred_H,
+      away_prediction = .pred_A
+    ) |> 
+    mutate(prediction = ifelse(home_prediction > away_prediction, home_team, away_team))
+  
+}
+```
+
+```{r}
+model_data <- read_csv(here("Data/02_Features/feature_engineered_df.csv")) |> 
+  drop_na(result)
+```
+
+```{r}
+nrl <- readxl::read_excel(here("Data/00_Raw/nrl.xlsx"), skip = 1) |> janitor::clean_names() |> 
+  filter(is.na(notes))
+
+odds <- nrl |> 
+  group_by(home_team, away_team, date) |> 
+  mutate(
+    total_close = 1/home_odds_close + 1/away_odds_close,
+    total_open = 1/home_odds_open + 1/away_odds_open,
+    h_closing_implied_pr = (1 / home_odds_close) / total_close,
+    h_open_implied_pr = (1 / home_odds_open) / total_open,
+    result = ifelse(home_score > away_score, 1, 0)
+         ) |> 
+  select(result, h_closing_implied_pr, h_open_implied_pr, home_odds_close, away_odds_close) |> 
+  ungroup()
+
+odds |> 
+  filter(date > cutoff) |> 
+  mutate(closing_log_loss = result * log(h_closing_implied_pr) + (1-result) * log(1 - h_closing_implied_pr),
+         open_log_loss = result * log(h_open_implied_pr) + (1-result) * log(1 - h_open_implied_pr)
+         ) |> 
+  summarise(
+    closing_log_loss = -mean(closing_log_loss, na.rm  =TRUE),
+    opening_log_loss = -mean(open_log_loss, na.rm = TRUE)
+  )
+```
+
+```{r Data Split}
+cutoff <- as.Date("2025-02-01")
+
+train_data <- model_data |>  filter(date < cutoff)
+test_data  <- model_data |>  filter(date >= cutoff)
+
+N <- nrow(train_data)
+number_folds <- 10
+assess <- 150
+skip <- 30
+initial <- -(number_folds*skip+assess-N)
+
+folds <- rolling_origin(
+  data = train_data,
+  initial = initial,
+  assess = assess,
+  skip = skip,
+  cumulative = TRUE
+)
+
+metrics <- yardstick::metric_set(mn_log_loss, roc_auc, accuracy, sens, specificity)
+train_data
+```
+
+
+```{r Model Recipes}
+xgb_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(home_team, away_team,
+          date, round) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_interact(terms = ~
+    elo_diff:outcome_mean_diff +
+      elo_diff:ladder_points_diff_diff +
+      tries_per_game_mean_diff:tries_conceded_per_game_mean_diff +
+      metres_per_run_mean_diff:metres_conceded_per_run_mean_diff +
+      lb_per_run_mean_diff:lb_conceded_per_touch_mean_diff
+  )
+
+rf_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(home_team, away_team,
+          date, round) |> 
+  step_zv(all_predictors()) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_interact(terms = ~
+    elo_diff:outcome_mean_diff +
+      elo_diff:ladder_points_diff_diff +
+      tries_per_game_mean_diff:tries_conceded_per_game_mean_diff +
+      metres_per_run_mean_diff:metres_conceded_per_run_mean_diff +
+      lb_per_run_mean_diff:lb_conceded_per_touch_mean_diff
+  )
+
+elastic_rec <- recipe(result ~ ., data = train_data) |> 
+  update_role(match_id, new_role = "ID") |> 
+  step_rm(home_team, away_team,
+          date, round) |> 
+  step_novel(all_nominal_predictors()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_interact(terms = ~
+    elo_diff:outcome_mean_diff +
+      elo_diff:ladder_points_diff_diff +
+      tries_per_game_mean_diff:tries_conceded_per_game_mean_diff +
+      metres_per_run_mean_diff:metres_conceded_per_run_mean_diff +
+      lb_per_run_mean_diff:lb_conceded_per_run_mean_diff
+  ) |> 
+  step_zv(all_predictors()) |> 
+  step_normalize(all_numeric_predictors()) |> 
+  step_impute_median(all_numeric_predictors())
+```
+
+```{r Spec}
+xgb_spec <- boost_tree(
+  trees = 2000,
+  tree_depth = tune(), 
+  min_n = tune(), 
+  loss_reduction = tune(),
+  sample_size = tune(), 
+  mtry = tune(),
+  learn_rate = tune(),
+  stop_iter = 100
+) |> 
+  set_engine("xgboost",
+             nthread = 4,
+             objective = "binary:logistic",
+             eval_metric = "logloss"
+             ) |> 
+  set_mode("classification")
+
+rf_spec <- rand_forest(
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) |> 
+  set_engine("ranger", importance = "permutation") |> 
+  set_mode("classification")
+
+elastic_spec <- logistic_reg(
+  penalty = tune(),
+  mixture = tune()
+) |> 
+  set_engine("glmnet") |> 
+  set_mode("classification")
+```
+
+```{r Workflow}
+elastic_wf <- workflow() |> 
+  add_model(elastic_spec) |> 
+  add_recipe(elastic_rec)
+
+xgb_wf <- workflow() |> 
+  add_model(xgb_spec) |> 
+  add_recipe(xgb_rec)
+
+rf_wf <- workflow() |> 
+  add_model(rf_spec) |> 
+  add_recipe(rf_rec)
+
+xgb_params <- xgb_wf |> 
+  extract_parameter_set_dials() |> 
+  update(
+    learn_rate = learn_rate(c(-4, -2)),
+    tree_depth = tree_depth(c(2L, 5L))
+  ) |> 
+  finalize(train_data)
+
+rf_params <- rf_wf |> 
+  extract_parameter_set_dials() |> 
+  update(
+    mtry = mtry(c(5L, 20L)),
+    trees = trees(c(500L, 1500L)),
+    min_n = min_n(c(0L, 40L))
+  )
+
+elastic_params <- elastic_wf |> 
+  extract_parameter_set_dials() |> 
+  update(
+    penalty = penalty(c(log10(0.01), log10(0.2)))
+  )
+
+xgb_grid <- grid_space_filling(
+  xgb_params,
+  size = 30
+)
+
+rf_grid <- grid_space_filling(
+  rf_params,
+  size = 20
+)
+
+elastic_grid <- grid_space_filling(
+  elastic_params,
+  size = 60
+)
+```
+
+```{r xgb Tune}
+set.seed(123)
+
+xgb_tune_res <- tune_grid(
+  xgb_wf,
+  resamples = folds,
+  grid = xgb_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE, save_workflow = TRUE),
+  metrics = metrics
+)
+```
+
+```{r}
+set.seed(123)
+
+rf_tune_res <- tune_grid(
+  rf_wf,
+  resamples = folds,
+  grid = rf_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE, save_workflow = TRUE),
+  metrics = metrics
+)
+```
+
+```{r}
+set.seed(123)
+
+elastic_tune_res <- tune_grid(
+  elastic_wf,
+  resamples = folds,
+  grid = elastic_grid,
+  control = control_grid(verbose = TRUE, save_pred = TRUE, save_workflow = TRUE),
+  metrics = metrics
+)
+```
+
+```{r}
+xgb_tune_res |> show_best(metric = "mn_log_loss") |> 
+  select(xgb_mean = mean, xgb_sd = std_err) |> 
+  bind_cols(
+    elastic_tune_res |> show_best(metric = "mn_log_loss") |> 
+      select(elastic_mean = mean, elastic_sd = std_err)
+  ) |> 
+  bind_cols(
+    rf_tune_res |> show_best(metric = "mn_log_loss") |> 
+      select(rf_mean = mean, rf_sd = std_err)
+  )
+```
+
+```{r}
+xgb_tune_res |> collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  pivot_longer(
+    cols = mtry:sample_size,
+    values_to = "value",
+    names_to = "parameter"
+  ) |> 
+  ggplot(aes(value, mean)) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), colour = "red", linewidth = 1.5) +
+  geom_point(size = 2) +
+  geom_smooth(method = "gam") +
+  facet_wrap(~parameter, scales = "free_x")
+
+# Lower learn rates are better, likely very noisy data that is easy to over fit too.
+
+rf_tune_res |> collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  pivot_longer(
+    cols = mtry:min_n,
+    values_to = "value",
+    names_to = "parameter"
+  ) |> 
+  filter(mean < 1) |> 
+  ggplot(aes(value, mean)) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), colour = "red", linewidth = 1.5) +
+  geom_point(size = 2) +
+  geom_smooth(method = "gam") +
+  facet_wrap(~parameter, scales = "free_x")
+
+# lower mtry
+
+elastic_tune_res |> collect_metrics() |> 
+  filter(.metric == "mn_log_loss") |> 
+  pivot_longer(
+    cols = penalty:mixture,
+    values_to = "value",
+    names_to = "parameter"
+  ) |> 
+  ggplot(aes(value, mean)) +
+  geom_errorbar(aes(ymin = mean - std_err, ymax = mean + std_err), colour = "red", linewidth = 1.5) +
+  geom_point(size = 2) +
+  geom_smooth(method = "gam") +
+  facet_wrap(~parameter, scales = "free_x")
+```
+
+
+```{r}
+xgb_best_logloss <- xgb_tune_res |> select_best(metric = "mn_log_loss")
+xgb_logloss <- (xgb_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+rf_best_logloss <- rf_tune_res |> select_best(metric = "mn_log_loss")
+rf_logloss <- (rf_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+
+elastic_best_logloss <- elastic_tune_res |> select_best(metric = "mn_log_loss")
+elastic_logloss <- (elastic_tune_res |> show_best(metric = "mn_log_loss", n = 1))$mean
+```
+
+```{r}
+saveRDS(xgb_tune_res, here("Outputs/xgb_tune_res.rds"))
+saveRDS(rf_tune_res, here("Outputs/rf_tune_res.rds"))
+saveRDS(elastic_tune_res, here("Outputs/elastic_tune_res.rds"))
+
+saveRDS(xgb_best_logloss, here("Outputs/xgb_model_parameters.rds"))
+saveRDS(rf_best_logloss, here("Outputs/rf_model_parameters.rds"))
+saveRDS(elastic_best_logloss, here("Outputs/elastic_model_parameters.rds"))
+```
+
+```{r}
+# baseline 43
+home_prop <- nrow(train_data[train_data$result == 1,])/nrow(train_data)
+away_prop <- nrow(train_data[train_data$result == 0,])/nrow(train_data)
+
+test_data |> 
+  transmute(
+    binary_result = as.numeric(as.character(result)),
+    logloss = -(binary_result * log(home_prop) + (1-binary_result) * log(away_prop)) 
+         ) |> 
+  select(logloss) |> 
+  summarise(baseline_mean = mean(logloss, na.rm = TRUE), baseline_sd = sd(logloss, na.rm = TRUE)/sqrt(n()))
+```
+
+
+```{r}
+xgb_final_wf <- finalize_workflow(xgb_wf, xgb_best_logloss)
+xgb_final_fit <- fit(xgb_final_wf, data = train_data)
+
+xgb_preds <- predict(xgb_final_fit, new_data = test_data, type = "prob") |> 
+    bind_cols(test_data) |> 
+    select(match_id, date, home_team, away_team, result, .pred_1, .pred_0) |> 
+    mutate(pred = ifelse(.pred_1 > .pred_0, home_team, away_team))
+```
+
+```{r}
+rf_final_wf <- finalize_workflow(rf_wf, rf_best_logloss)
+rf_final_fit <- fit(rf_final_wf, data = train_data)
+
+rf_preds <- predict(rf_final_fit, new_data = test_data, type = "prob") |> 
+    bind_cols(test_data) |> 
+    select(match_id, date, home_team, away_team, result, .pred_1, .pred_0) |> 
+    mutate(pred = ifelse(.pred_1 > .pred_0, home_team, away_team))
+```
+
+```{r}
+elastic_final_wf <- finalize_workflow(elastic_wf, elastic_best_logloss)
+elastic_final_fit <- fit(elastic_final_wf, data = train_data)
+
+elastic_preds <- predict(elastic_final_fit, new_data = test_data, type = "prob") |> 
+    bind_cols(test_data) |> 
+    select(match_id, date, home_team, away_team, result, .pred_1, .pred_0) |> 
+    mutate(pred = ifelse(.pred_1 > .pred_0, home_team, away_team))
+```
+
+```{r}
+vip::vip(xgb_final_fit, n = 30)
+# xgb: elo, ladder,field position, errors, lb, metres
+
+vip::vip(rf_final_fit, n = 30)
+# field position, eo, adder, linebreaks, metres
+```
+
+```{r}
+elastic_final_fit |> 
+  extract_fit_parsnip() |> 
+  tidy() |> 
+  filter(estimate != 0 & term != "(Intercept)") |> 
+  mutate(term = fct_reorder(term, abs(estimate))) |> 
+  ggplot(aes(term, estimate)) +
+  geom_point() +
+  geom_hline(yintercept = 0) +
+  coord_flip()
+
+ggsave(here("Outputs/glm_coefficient_plot.png"))
+```
+
+```{r}
+library(stacks)
+
+model_stack <-stacks() |>
+  add_candidates(rf_tune_res) |>
+  add_candidates(xgb_tune_res) |>
+  add_candidates(elastic_tune_res)
+
+
+model_stack_meta <- model_stack |>
+  blend_predictions(metric = metrics)
+
+model_stack_fit <- model_stack_meta |>
+  fit_members()
+
+model_stack_preds <- predict(model_stack_fit, test_data, type = "prob") |>
+  bind_cols(test_data) |> 
+  mutate(binary_result = as.numeric(as.character(result)))
+```
+
+```{r}
+model_stack_preds |> 
+  select(match_id, home_team, away_team, result, stack_away = .pred_0, stack_home = .pred_1) |> 
+  left_join(
+    xgb_preds |> select(xgb_home = .pred_1, xgb_away = .pred_0, match_id),
+    by = "match_id"
+  ) |> 
+  left_join(
+    rf_preds |> select(rf_home = .pred_1, rf_away = .pred_0, match_id),
+    by = "match_id"
+  ) |> 
+  left_join(
+    elastic_preds |> select(glm_home = .pred_1, glm_away = .pred_0, match_id),
+    by = "match_id"
+  ) |>
+  mutate(
+    result = as.numeric(as.character(result)),
+    avg_home = 0.1*xgb_home + 0.3*rf_home + 0.6*glm_home,
+    avg_away = 1 - avg_home
+    ) |> 
+  summarise(
+    stack_logloss = -mean(result * log(stack_home) + (1-result)*log(stack_away),  na.rm = TRUE),
+    xgb_logloss = -mean(result * log(xgb_home) + (1-result)*log(xgb_away), na.rm = TRUE  ),
+    rf_logloss = -mean(result * log(rf_home) + (1-result)*log(rf_away), na.rm = TRUE  ),
+    glm_logloss = -mean(result * log(glm_home) + (1-result)*log(glm_away), na.rm = TRUE  ),
+    avg_logloss = -mean(result * log(avg_home) + (1-result)*log(avg_away), na.rm = TRUE  )
+  )
+```
+
+```{r}
+build_reliability_df <- function(model_preds) {
+  model_preds |> 
+    select(.pred_1, .pred_0, result, match_id, date, home_team, away_team) |> 
+    mutate(result = as.numeric(as.character(result))) |> 
+    rename(home_pred = .pred_1) |> 
+    mutate(
+      pred_bins = case_when(
+        home_pred <= 0.1 ~ 0.1,
+        home_pred <= 0.2 & home_pred > 0.1 ~ 0.2,
+        home_pred <= 0.3 & home_pred > 0.2 ~ 0.3,
+        home_pred <= 0.4 & home_pred > 0.3 ~ 0.4,
+        home_pred <= 0.5 & home_pred > 0.4 ~ 0.5,
+        home_pred <= 0.6 & home_pred > 0.5 ~ 0.6,
+        home_pred <= 0.7 & home_pred > 0.6 ~ 0.7,
+        home_pred <= 0.8 & home_pred > 0.7 ~ 0.8,
+        home_pred <= 0.9 & home_pred > 0.8 ~ 0.9,
+        home_pred <= 1 & home_pred > 0.9 ~ 1,
+      )
+    ) |> 
+    group_by(pred_bins) |> 
+    mutate(home_win_prop = sum(result, na.rm = TRUE) / n()) |> 
+    ungroup()
+}
+
+build_reliability_plot <- function(reliability_df){
+  reliability_df |> 
+    group_by(pred_bins) |> 
+    summarise(
+      home_prop = mean(home_win_prop, na.rm = TRUE),
+      count = n()
+    ) |> 
+    filter(count > 10) |> 
+    ggplot(aes(pred_bins)) +
+    geom_line(aes(y = home_prop, colour = "Proportion of Home Wins"), linewidth = 2) +
+    geom_abline(slope = 1, linewidth = 2) +
+    scale_x_continuous(limits = c(0,1)) +
+    scale_y_continuous(limits = c(0,1)) +
+    labs(
+      title = "Calibration Curve (n > 10)",
+      x = "Model Prediction",
+      y = "Proportion of Home Wins"
+    )
+}
+```
+
+```{r}
+reliability_curve_df <- build_reliability_df(elastic_preds)
+
+build_reliability_plot(reliability_curve_df)
+
+ggsave(here("Outputs/glm_calibration_plot.png"))
+```
+
+```{r}
+val_data <- train_data |> filter(date > as_date("2022-01-01"))
+cal_data <- train_data |> filter(date <= as_date("2022-01-01"))
+```
+
+```{r}
+calibration_fit <- fit(elastic_final_fit, data = cal_data)
+
+cal_preds <- predict(calibration_fit, new_data = val_data, type = "prob") |> 
+  bind_cols(val_data |> select(date, result)) |> 
+  mutate(result = as.numeric(as.character(result)))
+
+glm_fit <- glm(result ~ .pred_1, 
+    data = cal_preds,
+    family = "binomial")
+
+cal_test_preds <- predict(glm_fit, newdata = elastic_preds, type = "response") |> 
+  as_tibble() |> 
+  rename(home_cal_pred = value) |> 
+  mutate(away_cal_pred = 1 - home_cal_pred) |> 
+  bind_cols(elastic_preds)
+
+cal_test_preds |> 
+  mutate(result = as.numeric(as.character(result))) |> 
+  summarise(
+    cal_logloss = -mean(result * log(home_cal_pred) + (1-result) * log(away_cal_pred), na.rm = TRUE ),
+    ml_logloss = -mean(result * log(.pred_1) + (1-result) * log(.pred_0), na.rm = TRUE),
+    cal_sd = sd(result * log(home_cal_pred) + (1-result) * log(away_cal_pred), na.rm = TRUE )/sqrt(n()),
+    ml_sd = sd(result * log(.pred_1) + (1-result) * log(.pred_0), na.rm = TRUE)/sqrt(n())
+  )
+```
+
+Bayesian:
+
+```{r}
+knitr::purl("modelling_nrlR.Rmd", output = "modelling_nrlR.R")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

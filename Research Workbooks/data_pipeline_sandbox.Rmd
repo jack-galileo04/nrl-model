@@ -1,0 +1,76 @@
+---
+title: "data_pipeline_sandbox"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+r_files <- list.files(
+  path = here::here("R"),
+  pattern = "\\.R$",
+  full.names = TRUE
+)
+
+invisible(lapply(r_files, source))
+```
+
+```{r}
+params <- read_params()
+
+historical_ladder_updated <- read_csv(here("Data/01_Clean/Ladder Data.csv"))
+historical_team_updated <- read_csv(here("Data/01_Clean/Team Data.csv"))
+historical_player_updated <- read_csv(here("Data/01_Clean/Player Data.csv"))
+historical_player_key <- read_csv(here("Data/01_Clean/Player Key.csv"))
+```
+
+```{r}
+PreviousRound_ladder <- fetch_PreviousRound_ladder_raw(params)
+PreviousRound_player <- fetch_PreviousRound_player_raw(params)
+PreviousRound_team <- fetch_PreviousRound_team_raw(params)
+```
+
+```{r}
+odds <- odds_API_fetch()
+```
+
+```{r}
+UpcomingRound_ladder <- fetch_UpcomingRound_ladder_raw(params)
+
+UpcomingRound_fixtures <- fetch_UpcomingRound_fixtures_raw(params)
+
+UpcomingRound_lineups <- fetch_UpcomingRound_lineups_raw(params)
+```
+
+```{r}
+PreviousRound_ladder_clean <- clean_PreviousRound_ladder(PreviousRound_ladder, params)
+
+PreviousRound_player_clean <- clean_PreviousRound_player(PreviousRound_player, params)
+
+PreviousRound_team_clean <- clean_PreviousRound_team(PreviousRound_team, params)
+```
+
+```{r}
+UpcomingRound_ladder_clean <- clean_UpcomingRound_ladder(UpcomingRound_ladder, params)
+
+UpcomingRound_fixtures_clean_long <- clean_UpcomingRound_fixtures(UpcomingRound_fixtures, params)
+
+UpcomingRound_lineups_clean <- clean_UpcomingRound_lineups(UpcomingRound_lineups, UpcomingRound_fixtures_clean_long, historical_player_key)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

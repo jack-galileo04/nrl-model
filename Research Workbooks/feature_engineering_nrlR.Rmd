@@ -1,0 +1,1050 @@
+---
+title: "feature_engineering_nrlR"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+r_files <- list.files(
+  path = here::here("R"),
+  pattern = "\\.R$",
+  full.names = TRUE
+)
+
+invisible(lapply(r_files, source))
+```
+
+```{r}
+params <- read_params()
+
+historical_ladder_updated <- read_csv(here("Data/01_Clean/Ladder Data.csv"))
+historical_team_updated <- read_csv(here("Data/01_Clean/Team Data.csv"))
+historical_player_updated <- read_csv(here("Data/01_Clean/Player Data.csv"))
+historical_player_key <- read_csv(here("Data/01_Clean/Player Key.csv"))
+```
+
+```{r}
+# on previous and upcoming round data
+joined_player_and_team_data <- join_player_and_team_data(historical_player_updated, historical_team_updated, historical_ladder_updated, UpcomingRound_lineups_clean)
+normalised_stats_data <- build_normalised_stats(joined_player_and_team_data, params)
+summarised_stats <- build_summarised_stats(normalised_stats_data, params)
+
+# append
+# then with upcoming data
+
+opponent_adjusted_stats <- build_opponent_adjusted_stats(summarised_stats, params)
+stats_features <- build_stats_features(opponent_adjusted_stats, params)
+TeamContext_features <- build_TeamContext_features(stats_features, params)
+elo_features <- build_elo_features(TeamContext_features, params)
+TeamLevel_features <- build_TeamLevel_features(elo_features)
+
+# select final features for modelling
+
+model_data <- select_final_features(TeamLevel_features)
+```
+
+# Feature Engineering
+
+```{r}
+join_player_and_team_data <- function(historical_player_updated, historical_team_updated, historical_ladder_updated, UpcomingRound_lineups) {
+  join_player_and_team_data <- historical_player_updated |> 
+  unite("name", firstname:surname, sep = "_") |> # combine into one variable
+  select(-competition_id, -season) |> 
+  left_join(
+    historical_team_updated |> 
+      select(match_id, team_name, team_location,
+             score:goal_line_dropouts),
+    by = c("match_id", "team_name", "team_location")
+    ) |> 
+    mutate(
+      season = year(utc_start),
+      team_name = str_extract(team_name, "\\w+$")
+      ) |> 
+    left_join(
+      historical_ladder_updated |> 
+        rename(team_name = team) |> 
+        mutate(team_name = case_when(
+          team_name == "Wests Tigers" ~ "Tigers",
+          team_name == "Sea Eagles" ~ "Eagles",
+          T ~ team_name
+        )) |> 
+        slice_head(n = 1, by = c("team_name", "season", "round")) |> 
+        select(team_name, season, round, ladder_points_diff = points_diff), 
+      by = c("team_name", "season", "round")
+      ) |> 
+  select(player_id:team_location, ladder_points_diff, score, everything()) |> 
+  arrange(utc_start, team_name, position)
+  
+  joined_data <- join_player_and_team_data |> 
+    bind_rows(
+    UpcomingRound_lineups |> 
+      unite("name", firstname:surname, sep = "_") |> 
+      select(any_of(colnames(join_player_and_team_data)))
+  ) |> 
+    distinct(player_id, match_id, .keep_all = TRUE) # no duplicate players
+    
+  return(joined_data)
+}
+
+build_normalised_stats <- function(joined_player_and_team_data, params) {
+  joined_player_and_team_data |>   
+    mutate(
+      goal_attempts = conversion_attempts + penalty_goal_attempts,
+        goals = conversions + penalty_goals
+    ) |> # fixes goal kicking (features are only used for percentage)
+    mutate(
+      goal_attempts = ifelse(goal_attempts == 0, NA, goal_attempts),
+      possessions = ifelse(possessions == 0, NA, possessions), 
+      kicks_general_play = ifelse(kicks_general_play < 3, NA, kicks_general_play), 
+      runs = ifelse(runs == 0, NA, runs), 
+      runs_hitup = ifelse(runs_hitup == 0, NA, runs_hitup), 
+      tackles = ifelse(tackles == 0, NA, tackles)
+      ) |> # cleans normalisation variables (no diving by zero)
+    mutate(
+      post_contact_metres = ifelse(year(utc_start) <= 2020, NA, post_contact_metres),
+      set_restarts = ifelse(year(utc_start) <= 2020, NA, set_restarts),
+      across(time_in_own_half:time_in_opp20, ~ .x / 60)
+    ) |> 
+    select(
+      -conversion_attempts, -penalty_goal_attempts, -conversions, - penalty_goals,
+      -tackleds, -handling_errors, -runs_normal, -runs_normal_metres,
+      ) |> # removes variables not used
+    group_by(match_id, team_name) |> 
+      mutate(
+      team_lb = sum(line_breaks),
+      team_tries = sum(tries),
+      team_metres = sum(run_metres),
+      team_pcm = sum(post_contact_metres),
+      team_errors = sum(errors),
+      team_penalties = sum(penalties_conceded),
+     team_runs = sum(runs),
+     team_possessions = sum(possessions)
+    ) |> 
+    group_by(match_id) |> 
+    mutate(
+      opponent_lb = rev(team_lb),
+      opponent_tries = rev(team_tries),
+      opponent_run_metres = rev(team_metres),
+      opponent_pcm = rev(team_pcm),
+      opponent_possessions = rev(team_possessions),
+      opponent_runs = rev(team_runs),
+      penalties = rev(team_penalties),
+      opponent_errors = rev(team_errors),
+      score_against = rev(score),
+      outcome = case_when(
+       score > score_against ~ 1,
+       score < score_against ~ 0,
+       T ~ 0.5
+     ),
+     forced_dropouts = rev(goal_line_dropouts)
+    ) |> 
+    ungroup() |> 
+    left_join(
+      params$position_minutes_weights, # estimate on minutes played in game based on position (not in data)
+      by = "position"
+      ) |> 
+    transmute(
+      player_id, name,team_name,position,utc_start,match_id,round,team_location,
+      ladder_points_diff,
+      score,
+      score_against,
+      outcome,
+      completion_rate_percentage, 
+      possession_percentage, 
+      time_in_own_half, 
+     time_in_opp_half, 
+     time_in_own20,time_in_opp20,
+    
+     set_restarts_per_game = set_restarts,
+     dropouts_per_game = goal_line_dropouts,
+     lb_conceded_per_run = opponent_lb / opponent_runs,
+     tries_conceded_per_game = opponent_tries,
+     metres_conceded_per_run = opponent_run_metres / opponent_runs,
+     pcm_conceded_per_run = opponent_pcm / opponent_runs,
+     penalties_per_game = penalties,
+     opponent_errors_per_game = opponent_errors,
+    
+     penalties_conceded_per_game = penalties_conceded,
+     tries_per_game = tries,
+      try_saves_per_game  = try_saves,
+      errors_per_game = errors,
+      forced_dropouts_per_game = forced_dropouts,
+    
+     pos_per_min = possessions * w,
+     runs_per_min = runs * w,
+    
+     goals_per_attempt = goals / goal_attempts,
+    
+     km_per_kick = kick_metres / kicks_general_play,
+    
+     lba_per_touch = line_break_assists / possessions,
+     ta_per_touch = try_assists / possessions,
+     kicks_per_touch = kicks_general_play / possessions, 
+
+     miss_per_tackle = missed_tackles / tackles,
+     ineff_per_tackle = tackles_ineffective / tackles,
+    
+     pcm_per_run = post_contact_metres / runs,
+      tb_per_run = tackle_breaks / runs,
+     off_per_run = offloads / runs,
+     lb_per_run = line_breaks / runs,
+     metres_per_run = run_metres / runs
+    ) |> 
+    group_by(player_id) |> 
+    mutate(
+      appearances = row_number()
+      ) |> 
+    ungroup() |> 
+    mutate(
+      round = floor(match_id / 100),
+      result = outcome
+      ) |> 
+    group_by(round, position) |> 
+    mutate(
+      across(score:appearances, ~scale(.x))
+    ) |> 
+    ungroup()
+}
+
+build_summarised_stats <- function(normalised_stats_data, params) {
+  position_summarised_stats <- normalised_stats_data |> 
+    summarise(
+      across(c(utc_start, round, team_location), ~first(.x)),
+      result = first(result),
+      ladder_points_diff = first(ladder_points_diff),
+      across(score:appearances, ~ mean(.x, na.rm = TRUE)),
+      .by = c(match_id, position, team_name)
+    )
+  
+  position_weights <- params$position_feature_weights
+  
+  summarised_stats <- position_summarised_stats |> 
+    pivot_longer(
+      score:appearances,
+      names_to = "feature",
+      values_to = "value"
+    ) |> 
+    left_join(position_weights, by = c("feature", "position")) |> 
+    mutate(
+      weight = replace_na(weight, 1 / nrow(params$position_minutes_weights)),
+      weighted_value = value * weight
+    ) |> 
+    summarise(
+      value = sum(weighted_value, na.rm = TRUE),
+      .by = c(match_id, team_name, utc_start, round, team_location, result, ladder_points_diff, feature)
+    ) |> 
+    pivot_wider(
+      names_from = feature,
+      values_from = value
+    )
+  
+  return(summarised_stats)
+}
+
+build_opponent_adjusted_stats <- function(summarised_stats, params) {
+  team_historical_avgs <- summarised_stats |> 
+    group_by(team_name) |> 
+    arrange(utc_start, .by_group = TRUE) |> 
+    transmute(
+      match_id,
+      avg_metres_conceded_per_run = rolling_mean(metres_conceded_per_run, params$lambda) |> lag(),
+      avg_metres_per_run = rolling_mean(metres_per_run, params$lambda) |> lag(),
+      avg_lb_conceded_per_run = rolling_mean(lb_conceded_per_run, params$lambda) |> lag(),
+      avg_lb_per_run = rolling_mean(lb_per_run, params$lambda) |> lag(),
+      avg_tries_conceded_per_game = rolling_mean(tries_conceded_per_game, params$lambda) |> lag(),
+      avg_tries_per_game = rolling_mean(tries_per_game, params$lambda) |> lag()
+    )
+  
+  opponent_adjusted_stats <- summarised_stats |> 
+    group_by(match_id) |> 
+    mutate(opponent = rev(team_name)) |> 
+    left_join(
+      team_historical_avgs |> rename(opponent = team_name),
+      by = c("match_id", "opponent")
+    ) |> 
+    mutate(
+      across(avg_metres_conceded_per_run:avg_tries_per_game, ~replace_na(.x, 0)),
+      adj_metres_per_run = metres_per_run - avg_metres_conceded_per_run,
+      adj_metres_conceded_per_run = metres_conceded_per_run - avg_metres_per_run,
+      adj_lb_per_run = lb_per_run - avg_lb_conceded_per_run,
+      adj_lb_conceded_per_run = lb_conceded_per_run - avg_lb_per_run,
+      adj_tries_per_game = tries_per_game - avg_tries_conceded_per_game,
+      adj_tries_conceded_per_game = tries_conceded_per_game - avg_tries_per_game
+    ) |> 
+    select(
+      match_id:appearances,
+      adj_metres_per_run:adj_tries_conceded_per_game
+    )
+  
+  return(opponent_adjusted_stats)
+}
+
+build_stats_features <- function(opponent_adjusted_stats, params) {
+  
+  stats_features <- opponent_adjusted_stats |> 
+    group_by(team_name) |> 
+    arrange(utc_start) |> 
+    mutate(
+      across(
+        score:adj_tries_conceded_per_game, 
+        list(
+          mean = ~rolling_mean(.x, params$lambda),
+          vol = ~rolling_var(.x, params$lambda)
+        ),
+        .names = "{.col}_{.fn}"
+      )
+    ) |> 
+    select(-(score:adj_tries_conceded_per_game)) |> 
+    ungroup()
+  
+  return(stats_features)
+}
+
+build_TeamContext_features <- function(stats_features, params) {
+  TeamContext_features <- stats_features |> 
+    group_by(team_name) |> 
+    arrange(utc_start) |> 
+    mutate(
+      round = round %% 100,
+      days_rest = as.double(utc_start - lag(utc_start)),
+      days_rest = ifelse(days_rest > 50, NA, days_rest),
+      season_stage = factor(case_when(
+        round < 12 ~ "Early",
+        round >= 12 & round <= 19 ~ "Mid",
+        round > 19 ~ "Late"), 
+        levels = c("Early", "Mid", "Late")
+        ),
+      form = rolling_mean(result, params$lambda),
+      ) |> 
+    ungroup()
+  
+  return(TeamContext_features)
+} 
+
+compute_elo <- function(df, k) {
+  elo.run(
+    result ~ team_home + team_away,
+    data = df,
+    k = k
+  ) |> 
+    as_tibble() |> 
+    bind_cols(
+      df |> 
+        drop_na(team_home, team_away) |> 
+        select(utc_start),
+      ) |> # select date from elo input
+    arrange(desc(utc_start)) |> 
+    select(team_home = team.A, team_away = team.B, elo_home = elo.A, elo_away = elo.B, utc_start) |> 
+    pivot_longer(
+      cols = team_home:elo_away,
+      names_to = c(".value", "team_location"),
+      names_sep = "_"
+    ) |> 
+    arrange(utc_start) |> 
+    group_by(team) |> 
+    mutate(elo = replace_na(elo, 1500)) |> 
+    ungroup()
+}
+
+build_elo_features <- function(TeamContext_features, params) {
+  elo_input <- TeamContext_features |> 
+    select(match_id, utc_start, team_name, team_location, result) |> 
+    rename(team = team_name) |> 
+    filter(n() < 2, .by = c(match_id, team)) |> 
+    pivot_wider(
+      names_from = team_location,
+      values_from = c(team, result)
+    ) |>    
+    transmute(
+      match_id, utc_start, team_home, team_away,
+      result = case_when(
+        result_home == 1 ~ 1,
+        result_home == 0 ~ 0,
+        result_home == 0.5 ~ 0.5
+      )
+    ) |> 
+    select(match_id, utc_start, team_home, team_away, result, everything()) |>
+    arrange(utc_start)
+
+  elo_model <- compute_elo(elo_input, k = params$elo_k)
+
+  recent_elo_model <- compute_elo(elo_input, k = 5) |> 
+    rename(shortelo = elo)
+
+  long_elo_model <- compute_elo(elo_input, k = 40) |> 
+    rename(longelo = elo)
+  
+  elo_features <- elo_input |> 
+    select(utc_start, match_id, team_home, team_away) |>
+    pivot_longer(
+      cols = team_home:team_away,
+      names_to = c(".value", "team_location"),
+      names_sep = "_"
+    ) |> 
+    left_join(elo_model) |> 
+    left_join(recent_elo_model) |> 
+    left_join(long_elo_model) |> 
+    mutate(
+      elo_short_vs_long = shortelo - longelo
+    ) |> 
+    select(-c(shortelo, longelo))
+  
+  TeamContext_features |> 
+    left_join(
+      elo_features |> 
+        select(match_id, team, elo, elo_short_vs_long) |> 
+        rename(team_name = team), 
+      by = c("match_id", "team_name")
+      ) |> 
+  select(match_id, utc_start, round, season_stage, result, team_location, team_name, everything())
+}
+
+build_TeamLevel_features <- function(basic_features) {
+  TeamLevel_features <- basic_features |> 
+  filter(n() < 2, .by = c(match_id,team_location)) |>
+  mutate(
+    across(ladder_points_diff:elo_short_vs_long, ~lag(.x)),
+    .by = team_name
+    ) |> 
+  pivot_wider(
+      id_cols = c(match_id, utc_start, round, season_stage),
+      names_from = team_location,
+      values_from = c(result, team_name:last_col()),
+      names_sep = "_"
+      ) |> 
+    mutate(
+      prhome = 1 / (1 + 10^( (elo_away - elo_home) / 400) ),
+      result = case_when(
+        result_home == 1 ~ "H",
+        result_away == 1 ~ "A",
+        T ~ NA
+      )
+    )  |> # ok to impute this statistics like this, NAs are typically zeroes or didn't actually get the stat
+    mutate(across(
+      where(is.numeric),
+      ~ ifelse(is.finite(.), ., NA_real_)
+      )) |> # removes infinities for model in case
+  select(-result_home, -result_away) |> 
+  mutate(
+    across(c(ends_with("_mean_home") | ends_with("_vol_home"), ladder_points_diff_home, elo_home, elo_short_vs_long_home),
+           ~ .-get(str_replace(cur_column(), "_home$", "_away")),
+           .names = "{str_remove(.col,'_home$')}_diff"
+           )
+      ) |> 
+  select(
+    -c(ends_with("_mean_home"), 
+       ends_with("_vol_home"), 
+       ends_with("_mean_away"), 
+       ends_with("_vol_away")),
+    -elo_away,
+    -elo_home,
+    -elo_short_vs_long_away,
+    -elo_short_vs_long_home
+    ) |> 
+  select(match_id, date = utc_start,
+         round,result, home_team = team_name_home, away_team = team_name_away, everything()
+         )
+  
+  return(TeamLevel_features)
+}
+
+select_final_features <- function(TeamLevel_features) {
+  final_features <- readRDS(here("Outputs/final_features_list.rds"))
+  
+  features_data <- TeamLevel_features |> 
+    select(
+      match_id:season_stage,
+      all_of(final_features)
+      )
+  
+  return(features_data)
+}
+
+build_model_data <- function(historical_player_updated, historical_team_updated, historical_ladder_updated, params) {
+  
+  joined <- join_player_and_team_data(
+    historical_player_updated, 
+    historical_team_updated,
+    historical_ladder_updated
+    )
+  message("Data Join Successful")
+  
+  normalised_stats <- build_normalised_stats(
+    joined_player_and_team_data = joined, 
+    params
+    )
+  message("Stat Normalisation Successful")
+  
+  summarised_stats <- build_summarised_stats(
+    normalised_stats_data = normalised_stats, 
+    params
+    )
+  message("Stat Summarisation Successful")
+  
+  opponent_adjusted_stats <- build_opponent_adjusted_stats(
+    summarised_stats = summarised_stats, 
+    params
+    )
+  message("Built Opponent Adjusted Stats")
+  
+  stats_features <- build_stats_features(
+    opponent_adjusted_stats = opponent_adjusted_stats,
+    params
+    )
+  message("Built Stat Based Features")
+  
+  TeamContext_features <- build_TeamContext_features(
+    stats_features = stats_features,
+    params
+  )
+  message("Built Context Based Features")
+  
+  basic_features <- build_elo_features(
+    TeamContext_features = TeamContext_features,
+    params
+  )
+  message("Built Elo Features")
+  
+  TeamLevel_features <- build_TeamLevel_features(
+    basic_features = basic_features
+  )
+  message("Feature Space Successful")
+  
+  model_data <- select_final_features(TeamLevel_features)
+  message("Selected Final Features")
+  
+  return(model_data)
+} # wrapper function
+```
+
+```{r join player and team data}
+
+joined_historical_data <- historical_player_updated |> 
+  unite("name", firstname:surname, sep = "_") |> # combine into one variable
+  select(-competition_id, -season) |> 
+  left_join(
+    historical_team_updated |> 
+      select(match_id, team_name, team_location,
+             score:goal_line_dropouts),
+    by = c("match_id", "team_name", "team_location")
+  ) |> 
+  select(player_id:team_location, score, everything()) |> 
+  arrange(utc_start, team_name, position)
+```
+
+```{r create and normalise stats}
+normalised_stats <- joined_historical_data |>   
+  mutate(
+    goal_attempts = conversion_attempts + penalty_goal_attempts,
+    goals = conversions + penalty_goals
+  ) |> # fixes goal kicking (features are only used for percentage)
+  mutate(
+    goal_attempts = ifelse(goal_attempts == 0, NA, goal_attempts),
+    possessions = ifelse(possessions == 0, NA, possessions), 
+    kicks_general_play = ifelse(kicks_general_play < 3, NA, kicks_general_play), 
+    runs = ifelse(runs == 0, NA, runs), 
+    runs_hitup = ifelse(runs_hitup == 0, NA, runs_hitup), 
+    tackles = ifelse(tackles == 0, NA, tackles)
+    ) |> # cleans normalisation variables (no diving by zero)
+  mutate(
+    post_contact_metres = ifelse(year(utc_start) <= 2020, NA, post_contact_metres),
+    set_restarts = ifelse(year(utc_start) <= 2020, NA, set_restarts),
+    across(time_in_own_half:time_in_opp20, ~ .x / 60)
+  ) |> 
+  select(
+    -conversion_attempts, -penalty_goal_attempts, -conversions, - penalty_goals,
+    -tackleds, -handling_errors, -runs_normal, -runs_normal_metres,
+    ) |> # removes variables not used
+  group_by(match_id, team_name) |> 
+  mutate(
+    team_lb = sum(line_breaks),
+    team_tries = sum(tries),
+    team_metres = sum(run_metres),
+    team_pcm = sum(post_contact_metres),
+    team_errors = sum(errors),
+    team_penalties = sum(penalties_conceded),
+    team_runs = sum(runs),
+    team_possessions = sum(possessions)
+  ) |> 
+  group_by(match_id) |> 
+  mutate(
+    opponent_lb = rev(team_lb),
+    opponent_tries = rev(team_tries),
+    opponent_run_metres = rev(team_metres),
+    opponent_pcm = rev(team_pcm),
+    opponent_possessions = rev(team_possessions),
+    opponent_runs = rev(team_runs),
+    penalties = rev(team_penalties),
+    opponent_errors = rev(team_errors),
+    score_against = rev(score),
+    outcome = case_when(
+      score > score_against ~ 1,
+      score < score_against ~ 0,
+      T ~ 0.5
+    ),
+    forced_dropouts = rev(goal_line_dropouts)
+  ) |> 
+  ungroup() |> 
+  left_join(
+    params$position_minutes_weights, # estimate on minutes played in game based on position (not in data)
+    by = "position"
+    ) |> 
+  transmute(
+    player_id, name,team_name,position,utc_start,match_id,round,team_location,
+    score,
+    score_against,
+    outcome,
+    completion_rate_percentage, 
+    possession_percentage, 
+    time_in_own_half, 
+    time_in_opp_half, 
+    time_in_own20,time_in_opp20,
+    
+    set_restarts_per_game = set_restarts,
+    dropouts_per_game = goal_line_dropouts,
+    lb_conceded_per_run = opponent_lb / opponent_runs,
+    tries_conceded_per_game = opponent_tries,
+    metres_conceded_per_run = opponent_run_metres / opponent_runs,
+    pcm_conceded_per_run = opponent_pcm / opponent_runs,
+    penalties_per_game = penalties,
+    opponent_errors_per_game = opponent_errors,
+    
+    penalties_conceded_per_game = penalties_conceded,
+    tries_per_game = tries,
+    try_saves_per_game  = try_saves,
+    errors_per_game = errors,
+    forced_dropouts_per_game = forced_dropouts,
+    
+    pos_per_min = possessions * w,
+    runs_per_min = runs * w,
+    
+    goals_per_attempt = goals / goal_attempts,
+    
+    km_per_kick = kick_metres / kicks_general_play,
+    
+    lba_per_touch = line_break_assists / possessions,
+    ta_per_touch = try_assists / possessions,
+    kicks_per_touch = kicks_general_play / possessions, 
+
+    miss_per_tackle = missed_tackles / tackles,
+    ineff_per_tackle = tackles_ineffective / tackles,
+    
+    pcm_per_run = post_contact_metres / runs,
+    tb_per_run = tackle_breaks / runs,
+    off_per_run = offloads / runs,
+    lb_per_run = line_breaks / runs,
+    metres_per_run = run_metres / runs
+  ) |> 
+  group_by(player_id) |> 
+  mutate(
+    appearances = row_number()
+    ) |> 
+  ungroup()
+```
+
+```{r scale stats across round and position}
+normalised_rounds_positions <- normalised_stats |> 
+  mutate(
+    round = floor(match_id / 100),
+    result = outcome
+    ) |> 
+  group_by(round, position) |> 
+  mutate(
+    across(score:appearances, ~scale(.x))
+  ) |> 
+  ungroup()
+```
+
+```{r summarise stats by position}
+position_summarised_stats <- normalised_rounds_positions |> 
+  group_by(match_id, position, team_name) |> 
+  summarise(
+    across(c(utc_start, round, team_location), ~first(.x)),
+    result = first(result),
+    across(score:appearances, ~ mean(.x, na.rm = TRUE))
+  ) |> 
+  ungroup()
+```
+
+```{r position contributions to team average}
+position_weights <- position_summarised_stats |> 
+  select(-(score:time_in_opp20)) |> # drop team based features (do not vary by player in game)
+  mutate(across(penalties_conceded_per_game:appearances, ~ rolling_mean(., params$lambda) |> lag())) |> 
+  mutate(
+    pcm_per_run = ifelse(year(utc_start) <= 2020, NA, pcm_per_run),
+    result = ifelse(result == 1, 1, 0)
+    ) |> 
+  pivot_longer(
+    set_restarts_per_game:last_col(),
+    names_to = "feature",
+    values_to = "value"
+  ) |> 
+  nest(.by = c(feature, position)) |> 
+  mutate(
+    cor = map_dbl(data, ~ cor(.x$value, .x$result, method = "spearman", use = "complete.obs"))
+  ) |> 
+  group_by(feature) |> 
+  mutate(
+    weight =  cor / sum(abs(cor))
+  ) |> 
+  select(feature, position, weight) |> 
+  ungroup()
+
+saveRDS(position_weights, here("Outputs/feature_position_weights.rds")) 
+```
+
+```{r summarise stats to team level}
+summarised_stats <- position_summarised_stats |> 
+  pivot_longer(
+    score:appearances,
+    names_to = "feature",
+    values_to = "value"
+  ) |> 
+  left_join(position_weights, by = c("feature", "position")) |> 
+  mutate(
+    weight = replace_na(weight, 1 / nrow(params$position_minutes_weights)), # even average for number of positions
+    weighted_value = value * weight
+    ) |> 
+  summarise(
+    value = sum(weighted_value, na.rm = TRUE),
+    .by = c(match_id, team_name, utc_start, round, team_location, result, feature)
+  ) |> 
+  pivot_wider(
+    names_from = feature,
+    values_from = value
+  )
+```
+
+```{r get team rolling historical averages}
+team_historical_avgs <- summarised_stats |> 
+  group_by(team_name) |> 
+  arrange(utc_start, .by_group = TRUE) |> 
+  transmute(
+    match_id,
+    avg_metres_conceded_per_run = rolling_mean(metres_conceded_per_run, params$lambda) |> lag(),
+    avg_metres_per_run = rolling_mean(metres_per_run, params$lambda) |> lag(),
+    avg_lb_conceded_per_run = rolling_mean(lb_conceded_per_run, params$lambda) |> lag(),
+    avg_lb_per_run = rolling_mean(lb_per_run, params$lambda) |> lag(),
+    avg_tries_conceded_per_game = rolling_mean(tries_conceded_per_game, params$lambda) |> lag(),
+    avg_tries_per_game = rolling_mean(tries_per_game, params$lambda) |> lag()
+  )
+
+saveRDS(team_historical_avgs, here("Outputs/feature_historical_averages.rds")) 
+```
+
+```{r create opponent adjusted stats}
+summarised_adjusted_stats <- summarised_stats |> 
+  group_by(match_id) |> 
+  mutate(opponent = rev(team_name)) |> 
+  left_join(
+    team_historical_avgs |> rename(opponent = team_name),
+    by = c("match_id", "opponent")
+  ) |> 
+  mutate(
+    across(avg_metres_conceded_per_run:avg_tries_per_game, ~replace_na(.x, 0)),
+    adj_metres_per_run = metres_per_run - avg_metres_conceded_per_run,
+    adj_metres_conceded_per_run = metres_conceded_per_run - avg_metres_per_run,
+    adj_lb_per_run = lb_per_run - avg_lb_conceded_per_run,
+    adj_lb_conceded_per_run = lb_conceded_per_run - avg_lb_per_run,
+    adj_tries_per_game = tries_per_game - avg_tries_conceded_per_game,
+    adj_tries_conceded_per_game = tries_conceded_per_game - avg_tries_per_game
+  ) |> 
+  select(
+    match_id:appearances,
+    adj_metres_per_run:adj_tries_conceded_per_game
+  )
+```
+
+```{r finalise stat features}
+stat_features <- summarised_adjusted_stats |> 
+  group_by(team_name) |> 
+  arrange(utc_start) |> 
+  mutate(
+    across(
+      score:adj_tries_conceded_per_game, 
+      list(
+        mean = ~rolling_mean(.x, params$lambda),
+        vol = ~rolling_var(.x, params$lambda)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  ) |> 
+  select(-(score:adj_tries_conceded_per_game)) |> 
+  ungroup()
+```
+
+```{r build team context features}
+TeamContext_features <- stat_features |> 
+  group_by(team_name) |> 
+  arrange(utc_start) |> 
+  mutate(
+    round = round %% 100,
+    days_rest = as.double(utc_start - lag(utc_start)),
+    days_rest = ifelse(days_rest > 50, NA, days_rest),
+    team_name = str_extract(team_name, "\\w+$"),
+    season_stage = factor(case_when(
+      round < 12 ~ "Early",
+      round >= 12 & round <= 19 ~ "Mid",
+      round > 19 ~ "Late"), 
+      levels = c("Early", "Mid", "Late")
+      ),
+    form = rolling_mean(result, params$lambda),
+    season = year(utc_start),
+    ) |> 
+  left_join(
+    historical_ladder_updated |> 
+      rename(team_name = team) |> 
+      mutate(team_name = case_when(
+        team_name == "Wests Tigers" ~ "Tigers",
+        team_name == "Sea Eagles" ~ "Eagles",
+        T ~ team_name
+      )) |> 
+      slice_head(n = 1, by = c("team_name", "season", "round")) |> 
+      select(team_name, season, round, ladder_points_diff = points_diff), 
+    by = c("team_name", "season", "round")
+    ) |> 
+  ungroup()
+```
+
+```{r elo function}
+
+compute_elo <- function(df, k) {
+  elo.run(
+    result ~ team_home + team_away,
+    data = df,
+    k = k
+  ) |> 
+    as_tibble() |> 
+    bind_cols(
+      df |> 
+        drop_na(team_home, team_away) |> 
+        select(utc_start),
+      ) |> # select date from elo input
+    arrange(desc(utc_start)) |> 
+    select(team_home = team.A, team_away = team.B, elo_home = elo.A, elo_away = elo.B, utc_start) |> 
+    pivot_longer(
+      cols = team_home:elo_away,
+      names_to = c(".value", "team_location"),
+      names_sep = "_"
+    ) |> 
+    arrange(utc_start) |> 
+    group_by(team) |> 
+    mutate(elo = replace_na(elo, 1500)) |> 
+    ungroup()
+}
+```
+
+```{r build elo variables}
+elo_input <- TeamContext_features |> 
+  select(match_id, utc_start, team_name, team_location, result) |> 
+  rename(team = team_name) |> 
+  filter(n() < 2, .by = c(match_id, team)) |> 
+  pivot_wider(
+    names_from = team_location,
+    values_from = c(team, result)
+  ) |>    
+  transmute(
+    match_id, utc_start, team_home, team_away,
+    result = case_when(
+      result_home == 1 ~ 1,
+      result_home == 0 ~ 0,
+      result_home == 0.5 ~ 0.5
+    )
+  ) |> 
+  select(match_id, utc_start, team_home, team_away, result, everything()) |>
+  arrange(utc_start)
+
+elo_model <- compute_elo(elo_input, k = params$elo_k)
+
+recent_elo_model <- compute_elo(elo_input, k = 5) |> 
+  rename(shortelo = elo)
+
+long_elo_model <- compute_elo(elo_input, k = 40) |> 
+  rename(longelo = elo)
+  
+elo_features <- elo_input |> 
+    select(utc_start, match_id, team_home, team_away) |>
+    pivot_longer(
+      cols = team_home:team_away,
+      names_to = c(".value", "team_location"),
+      names_sep = "_"
+    ) |> 
+    left_join(elo_model) |> 
+    left_join(recent_elo_model) |> 
+    left_join(long_elo_model) |> 
+  mutate(
+    elo_short_vs_long = shortelo - longelo
+  ) |> 
+  select(-c(shortelo, longelo))
+```
+
+```{r, fig.height=10, fig.width = 10}
+elo_features |> 
+  filter(!is.na(team)) |> 
+  ggplot(aes(x = utc_start)) +
+  geom_line(aes(y = elo), alpha = 0.5) +
+  facet_wrap(~team, scales = "free_x")
+
+ggsave(here("Reporting/team_strengths_over_time.png"))
+```
+
+```{r combine features and create differentials}
+TeamLevel_features <- TeamContext_features |> 
+    left_join(
+      elo_features |> 
+        select(match_id, team, elo, elo_short_vs_long) |> 
+        rename(team_name = team), 
+      by = c("match_id", "team_name")
+      ) |> 
+  select(match_id, utc_start, round, season_stage, result, team_location, team_name, everything(), -season) |>
+  filter(n() < 2, .by = c(match_id,team_location)) |>
+  mutate(
+    across(score_mean:elo_short_vs_long, ~lag(.x)),
+    .by = team_name
+  ) |> 
+  pivot_wider(
+      id_cols = c(match_id, utc_start, round, season_stage),
+      names_from = team_location,
+      values_from = c(result, team_name:last_col()),
+      names_sep = "_"
+      ) |> 
+    mutate(
+      prhome = 1 / (1 + 10^( (elo_away - elo_home) / 400) ),
+      result = ifelse(result_home == 1, 1, 0)
+    )  |> # ok to impute this statistics like this, NAs are typically zeroes or didn't actually get the stat
+    mutate(across(
+      where(is.numeric),
+      ~ ifelse(is.finite(.), ., NA_real_)
+      )) |> # removes infinities for model in case
+  select(-result_home, -result_away) |> 
+  mutate(
+    across(c(ends_with("_mean_home") | ends_with("_vol_home"), ladder_points_diff_home, elo_home, elo_short_vs_long_home),
+           ~ .-get(str_replace(cur_column(), "_home$", "_away")),
+           .names = "{str_remove(.col,'_home$')}_diff"
+           )
+      ) |> 
+  select(
+    -c(ends_with("_mean_home"), 
+       ends_with("_vol_home"), 
+       ends_with("_mean_away"), 
+       ends_with("_vol_away")),
+    -elo_away,
+    -elo_home,
+    -elo_short_vs_long_away,
+    -elo_short_vs_long_home
+    ) |> 
+  select(match_id, date = utc_start,
+         round,result, home_team = team_name_home, away_team = team_name_away, everything()
+         ) |> 
+  drop_na(result)
+```
+
+```{r feature selection}
+library(Boruta)
+
+X_data <- TeamLevel_features |> 
+  drop_na(result) |> 
+  select(where(is.numeric)) |> 
+  select(-match_id:-result) |> 
+  mutate(across(everything(), ~ replace_na(., mean(., na.rm = TRUE)))) |> 
+  as.matrix()
+class(X_data) <- "numeric"
+
+y_target <- TeamLevel_features |> 
+  select(result) |> 
+  drop_na() |> 
+  as.matrix() |> 
+  as.numeric()
+
+set.seed(42)
+
+boruta_output <- Boruta(
+  x = X_data, 
+  y = y_target,
+  maxRuns = 100,
+  doTrace = 2
+       )
+
+final_boruta <- TentativeRoughFix(boruta_output)
+
+final_features <- getSelectedAttributes(final_boruta)
+saveRDS(final_features, here("Outputs/final_features_list.rds"))
+```
+
+```{r fig.height = 10, fig.width = 10}
+final_boruta$ImpHistory |> as_tibble() |> 
+  gather() |> 
+  mutate(key = fct_reorder(key, value, median)) |> 
+  ggplot(aes(key, value)) +
+  geom_boxplot() +
+  coord_flip()
+
+ggsave(here("Reporting/boruta_feature_importance.png"))
+```
+
+```{r features data}
+
+model_data <- TeamLevel_features |> 
+  select(
+    match_id:season_stage,
+    all_of(final_features)
+    ) |> 
+  drop_na(result) |> 
+  mutate(result = factor(result))
+```
+
+```{r}
+db_write(
+  connection = con,
+  schema = "feat",
+  table = "Model Data",
+  df = model_data
+)
+```
+
+```{r}
+knitr::purl("feature_engineering_nrlR.Rmd", output = "feature_engineering_nrlR.R")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
