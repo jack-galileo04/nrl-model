@@ -36,7 +36,7 @@ This project follows a structured pipeline:
 3. **Feature engineering**
    - Team-level features (elo model, rolling form match statistics, performance trends, ladder details, match context, etc)
    - Player-level features (lineups, aggregated rolling form player statistics, position weightings)
-   - Combined feature dataset for modelling
+   - No bookmaker odds are used as features
 
 4. **Modelling**
    - Predict match outcome
@@ -112,8 +112,8 @@ This ensures the outputs always align with the latest code and data, improving r
 
 ## Results
 
-- Best logloss (probability calibration) on train/test split was 0.58 (uninformative model baseline for binary classification is 0.693)
-- Current closing line value (indicator of betting edge if positive) is 3.7%, but is NOT statistically significant according to a right-tailed t-test at 95% confidence
+- Best logloss (probability calibration) on hold out split was 0.64 (betting using home advantage as a baseline for binary classification yields approximately a 0.68-0.69)
+- Current closing line value (indicator of betting edge if positive) is statistically significant according to a right-tailed t-test and boot strapping at 95% confidence
 
 ---
 
@@ -154,7 +154,7 @@ Excel:
 - Implement more safeguards
 - Move storage to a database
 
-- Improve feature engineering (e.g. injuries, travel, weather, head-to-head, venue record, variances)
+- Improve feature engineering (e.g. travel, weather, venue record, variances)
 - Improve modelling framework (historical odds calibration, Bayesian hierarchical models, ensemble stacking)
 - Enhance model explainability (move to penalised logistic regression, incorporate model selection and visualisations into pipeline)
 
